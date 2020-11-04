@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang='en'>
+
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+	<title>DSS Monitor and Control</title>
+	<link type="text/css" rel="stylesheet" href="./dist/bundle.css">
+	<link type="text/css" rel="stylesheet" href="./src/styles.css">
+</head>
+<body>
+	<div class="container" id="main">
+		<h4>DSS<code id="station-number">43</code> Monitor and Control</h4>
+		<div id="source-monitor" class="row">
+			<d3-polar-plot v-bind:circles="sources" v-bind:width="sourcePlot.width" v-bind:height="sourcePlot.height" v-bind:key="sourcePlot.render"></d3-polar-plot>
+		</div>
+	</div>
+			<div class="two columns">
+				<div class="panel" id="source-display-control">
+					<div class="panel-heading">Category</div>
+					<rounded-check-button-list v-bind:contents="sourcePlot.styles" id="source-type-select"></rounded-check-button-list>
+					<!-- <rounded-check-button-list v-bind:contents="plotStyles" id="source-type-select"></rounded-check-button-list>
+					<div class="button-list" id="source-type-select"></div> -->
+					<div class="panel-heading">Filters</div>
+					<div class="overlap-list" id="filter-select">
+						<div class="overlap-list-item">
+							<div class="space-between flex-row" id="by-angle-header">
+								<div class="subb panel-heading no-pad bottom"><span id="by-angle-expand"></span>By Angle</div>
+							</div>
+							<div id="by-angle-body">
+								<div class="no-border panel">
+									<div class='flex-row-block'>
+									<div class="space-between flex-row">Azimuth</div>
+									<div class="flex-row">
+										<div id="min-az-slider" class="four slider"></div>
+										<label id="min-az-label" class="one"><code>0</code></label>
+									</div>
+									<div class="space-between flex-row">
+										<div id="max-az-slider" class="slider"></div>
+										<label id="max-az-label"><code>360</code></label>
+									</div>
+									<div class="space-between flex-row">Elevation</div>
+									<div class="space-between flex-row">
+										<div id="min-el-slider" class="slider"></div>
+										<label id="min-el-label"><code>18</code></label>
+									</div>
+									<div class="space-between flex-row">
+										<div id="max-el-slider" class="slider"></div>
+										<label id="max-el-label"><code>90</code></label>
+									</div>
+									</div>
+									<button class="u-full-width" id="by-angle-apply">Apply</button>
+								</div>
+							</div>
+						</div>
+						<div class="overlap-list-item">
+							<div class="space-between flex-row" id="by-flux-header">
+								<div class="subb panel-heading no-pad bottom"><span id="by-flux-expand"></span>By Flux</div>
+								<span class="check"></span>
+							</div>
+							<div id="by-flux-body"></div>
+						</div>
+					</div>
+				</div>
+			</div>
+			<div class="seven columns" id="source-plot"></div>
+			<div class="three columns">
+				<div class="panel scrollable-area" id="selected-source-display">
+					<div class="no-border panel">
+						<div class="panel-heading">Search</div>
+						<drop-down-input id="source-search" v-bind:contents="sourceNames"></drop-down-input>
+						<!-- <div id="source-search"></div> -->
+					</div>
+					<div class="no-border panel scrollable-y" id="source-info">
+						<div class="panel-heading">Source Information</div>
+						<div class="table u-full-width">
+						</div>
+						<div id="add-to-queue">
+							<hr/>
+							<button class="u-full-width" >Add to Queue</button>
+						</div>
+					</div>
+					<div class="no-border panel" id="source-queue">
+						<div class="panel-heading">Source Queue</div>
+						<div class="button-list"></div>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="panel-heading" id="current-source"></div>
+		<div class="row">
+			<div class="seven columns">
+				<div id="calibration" class="panel">
+					<div class="panel-heading">Calibration</div>
+					<div id="boresight">
+						<div class="space-between flex-row" id="boresight-header">
+							<div class="sub panel-heading"><span id="expand-boresight"></span>Boresight</div>
+							<button class="play-pause" id="start-boresight"></button>
+						</div>
+						<div class="row" id="boresight-body">
+							<div class="seven columns" id="boresight-plot">
+							</div>
+							<div class="five columns">
+								<div id="boresight-control" class="panel">
+									<div class="subb sub panel-heading">Boresight Control</div>
+									<div class="table">
+										<div class="table-row">
+											<div class="table-element" style="flex: 1;">Type</div>
+											<div class="table-element" style="flex: 2;"><div id="boresight-type-dropdown"></div></div>
+										</div>
+										<div class="table-row">
+											<div class="table-element" style="flex: 2;">Iterations</div>
+											<div class="table-element" style="flex: 1;"><div id="boresight-iter-spinner"></div></div>
+										</div>
+										<div class="table-row">
+											<div class="table-element" style="flex: 2;">Settle Time</div>
+											<div class="table-element" style="flex: 1;"><div id="boresight-settle-time-spinner"></div></div>
+										</div>
+										<div class="table-row">
+											<div class="table-element" style="flex: 2;">Offset Rate</div>
+											<div class="table-element" style="flex: 1;"><div id="boresight-offset-rate-spinner"></div></div>
+										</div>
+										<div class="table-row">
+											<div class="table-element" style="flex: 2;">Sample Rate</div>
+											<div class="table-element" style="flex: 1;"><div id="boresight-sample-rate-spinner"></div></div>
+										</div>
+										<div class="table-row">
+											<div class="table-element" style="flex: 2;">Limit</div>
+											<div class="table-element" style="flex: 1;"><div id="boresight-limit-spinner"></div></div>
+										</div>
+										<div class="table-row">
+											<div class="table-element" style="flex: 2;"># points</div>
+											<div class="table-element" style="flex: 1;"><div id="boresight-n-points-spinner"></div></div>
+										</div>
+										<div class="table-row">
+											<div class="table-element" style="flex: 2;">Integration time</div>
+											<div class="table-element" style="flex: 1;"><div id="boresight-integration-time-spinner"></div></div>
+										</div>
+									</div>
+								</div>
+							</div>
+						</div>
+					</div>
+					<div id="flux-calibration">
+						<div class="space-between flex-row" id="flux-calibration-header">
+							<div class="sub panel-heading"><span id="expand-flux-calibration"></span>Flux Calibration</div>
+							<button class="play-pause" id="start-flux-calibration"></button>
+						</div>
+						<div class="row" id="flux-calibration-body">
+							<div class="seven columns"><div id="flux-calibration-plot"></div></div>
+							<div class="five columns"><div class="panel" id="flux-calibration-report">
+								<div class="subb sub panel-heading">Flux Calibration Report</div>
+								<div class="table">
+								</div>
+							</div></div>
+						</div>
+					</div>
+					<div id="spectrometer-calibration">
+						<div id="spectrometer-calibration-header">
+							<div class="sub panel-heading"><span id="expand-spectrometer-calibration"></span>Spectrometer Calibration</div>
+						</div>
+						<div class="row" id="spectrometer-calibration-body">
+							<div class="twelve columns">
+							<div class="panel">
+							<div class="table">
+								<div class="table-row">
+									<div class="table-element" style="flex: 1;text-align:center;">ROACH</div>
+									<div class="table-element" style="flex: 2;">Gain</div>
+									<div class="table-element" style="flex: 1;">ADC RMS</div>
+									<div class="table-element" style="flex: 2;text-align:center;">Setup</div>
+								</div>
+							</div>
+							</div>
+							</div>
+						</div>
+					</div>
+					<div id="tipping">
+						<div id="tipping-header">
+							<div class="sub panel-heading"><span id="expand-tipping"></span>Tipping</div>
+						</div>
+						<div class="row" id="tipping-body">
+						</div>
+					</div>
+				</div>
+			</div>
+			<div class="five columns">
+				<div id="monitor" class="panel">
+					<div class="panel-heading">Monitor</div>
+					<div id="antenna-monitor">
+						<div id="antenna-monitor-heading">
+							<div class="sub panel-heading"><span id="expand-antenna-monitor"></span>Antenna</div>
+						</div>
+						<div id="antenna-monitor-body">
+						<div class="table">
+							<div class="table-row">
+								<div class="header greedy table-element">Current Azimuth</div>
+								<div class="greedy table-element" id="antenna-az"><code>90</code></div>
+								<div class="header greedy table-element">Predicted Azimuth</div>
+								<div class="greedy table-element" id="antenna-az-pred"><code>90</code></div>
+							</div>
+							<div class="table-row">
+								<div class="header greedy table-element">Current Elevation</div>
+								<div class="greedy table-element" id="antenna-el"><code>90</code></div>
+								<div class="header greedy table-element">Predicted Elevation</div>
+								<div class="greedy table-element" id="antenna-el-pred"><code>90</code></div>
+							</div>
+							<hr>
+							<div class="table-row">
+								<div class="header greedy table-element">Elevation Offset</div>
+								<div class="greedy table-element" id="antenna-el-po"><code>0.0</code></div>
+								<div class="header greedy table-element">Elevation Offset Rate</div>
+								<div class="greedy table-element" id="antenna-el-ro"><code>0.0</code></div>
+							</div>
+							<div class="table-row">
+								<div class="header greedy table-element">Cross Elevation Offset</div>
+								<div class="greedy table-element" id="antenna-xel-po"><code>0.0</code></div>
+								<div class="header greedy table-element">Cross Elevation Offset Rate</div>
+								<div class="greedy table-element" id="antenna-xel-ro"><code>0.0</code></div>
+							</div>
+							<hr>
+						</div>
+						</div>
+					</div>
+					<div id="power-meter-monitor">
+						<div id="power-meter-monitor-heading">
+							<div class="sub panel-heading"><span id="expand-power-meter-monitor"></span>Power Meters</div>
+						</div>
+						<div id="power-meter-monitor-body">
+							<div class="row">
+								<div class="seven columns">
+									<div id="power-meter-plot"></div>
+								</div>
+								<div class="five columns">
+									<div id="power-meter-text-monitor" class="panel">
+										<div class="table">
+											<div class="header table-row">
+												<div class="table-element">PM</div>
+												<div class="table-element">Temp (K)</div>
+											</div>
+										</div>
+									</div>
+								</div>
+							</div>
+						</div>
+					</div>
+				</div>
+				<div id="control" class="panel">
+					<div class="panel-heading">Control</div>
+					<div id="antenna-point">
+						<div class="space-between flex-row" id="point-header">
+							<div class="sub panel-heading"><span id="expand-point"></span>Point</div>
+							<button id="start-point"></button>
+						</div>
+						<div class="no-border panel" id="point-body">
+							<div class="center flex-row">
+								<div><label>Manual RA (J2000)</label><input type="text" id="manual-ra" placeholder="00:06:13.892894"></div>
+								<div><label>Manual DEC (J2000)</label><input type="text" id="manual-dec" placeholder="-06:23:35.335300"></div>
+							</div>
+						</div>
+					</div>
+					<div id="antenna-manual-po">
+						<div class="sub panel-heading"><span id="expand-manual-po"></span>Manual Offsets</div>
+						<div class="no-border panel" id="manual-po-body">
+							<div class="center bold flex-row">
+								<div class="table-element"><label>EL</label></div>
+								<div id="manual-el-spinner" class="table-element"></div>
+								<div class="table-element"><label>xEL</label></div>
+								<div id="manual-xel-spinner" class="table-element"></div>
+							</div>
+						</div>
+					</div>
+					<div id="antenna-nod">
+						<div class="space-between flex-row" id="nod-header">
+							<div class="sub panel-heading"><span id="expand-nod"></span>Nodding</div>
+							<button id="start-nod" class="play-pause"></button>
+						</div>
+						<div class="row" id="nod-body">
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+	</div>
+	<script src="./dist/bundle.js"></script>
+	<script src="./src/util.js"></script>
+	<script src="./src/pausable_timer.js"></script>
+	<script src="./src/components/components.js"></script>
+	<script src="./src/components/DropDown.js"></script>
+	<script src="./src/components/RoundedList.js"></script>
+	<script src="./src/components/SpinBox.js"></script>
+	<script src="./src/components/D3PolarPlot.js"></script>
+	<script src="./src/app.js"></script>
+</body>

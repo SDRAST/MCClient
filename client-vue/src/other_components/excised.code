@@ -1,0 +1,162 @@
+      getSources(time){
+            logger.debug(`App.getSources: ${time}`)
+            this.serverCommand(
+                "get_sources",
+                [this.sourceNames],
+                {
+                    when:time,
+                    formatter:"%Y-%m-%dT%H:%M:%S.%fZ"
+                },
+                "get_sources_handler"
+            )
+      },
+
+
+      loadSourcesHandler(data){
+            logger.debug("App.loadSourcesHandler: called")
+            var verifiers = data.args[0]["verifiers"]
+            var sources = Object.assign(verifiers, data.args[0]["sources"])
+            this.sourceNames = Object.keys(sources)
+            var changeTime = ()=>{
+                if (this.sourceMonitorTime === null){
+                    var time = new Date().toISOString()
+                    this.getSources(time)
+                }
+            }
+            this.timer = new PausableTimer(changeTime, this.sourceUpdateTime)
+            this.timer.start()
+      },
+
+
+      getSourcesHandler(data){
+            logger.debug("App.getSourcesHandler: called")
+            var sources = data.args[0]
+            this.sourcesObject = sources
+            this.sources = this.sourcesObjectToSourceList(sources)
+      },
+
+
+      roachNameHandler(data){
+            logger.debug(`App.roachNameHandler: called`)
+            var ROACHNames = data.args[0]
+            logger.debug(`App.roachNameHandler: got ${ROACHNames}`)
+            this.ROACHNames = ROACHNames
+      },
+
+      hostNameHandler(data){
+            var hostName = data
+            logger.debug(`App.hostNameHandler: hostName: ${hostName}`)
+            bus.$emit("status:change", `Remote host name: ${hostName}`)
+            var sourceDir = this.hostNameConfig[hostName]
+            this.serverCommand(
+                "set_info",[["project","source_dir"],sourceDir],{},"set_info_handler")
+            this.serverCommand(
+                "load_sources",[],{},"load_sources_handler")
+            this.serverCommand(
+                "get_info",[],{},"get_info_handler")
+            this.serverCommand(
+                "hdwr", ["Backend", "roachnames"], {}, "roachnames_handler")
+      },
+
+
+      registerSocketHandlers(){
+            logger.debug(`App.registerSocketHandlers`)
+            this.socket.on("hostname",             this.hostNameHandler)
+            this.socket.on("set_info_handler",     this.setInfoHandler)
+            this.socket.on("load_sources_handler", this.loadSourcesHandler)
+            this.socket.on("get_sources_handler",  this.getSourcesHandler)
+            this.socket.on('get_info_handler',     this.getInfoHandler)
+            this.socket.on("roachnames_handler",   this.roachNameHandler)
+      },
+
+
+      setInfoHandler(data){
+            logger.debug("App.setInfoHandler: called")
+      },
+
+
+      loadSourcesHandlerOldOld(data){
+        // this version which handles the server response from "get_source_names"
+        // has now been replaced by one that sets sourcePlot.styles to null.
+        logger.debug("App.loadSourcesHandler: called")
+        this.sourceNames = data.args[0]
+        var changeTime = ()=>{
+          logger.debug(`App.loadSourcesHandler.changeTime: source time is ${this.sourceMonitorTime}`)
+          if (this.sourceMonitorTime === null){
+              logger.debug("App.loadSourcesHandler.changeTime called")
+              var time = new Date().toISOString()
+              this.getSources(time)
+          }
+        }
+        // this sets up the timer
+        this.timer = new PausableTimer(changeTime, this.sourceUpdateInterval)
+        this.timer.start()
+        logger.debug(`App.loadSourcesHandler: timer started for ${this.sourceUpdateInterval} s`)
+      },
+
+
+      loadSourcesHandlerOld(data){
+        // This is called the first time to generate a list of source names
+        // and start a timer to cause the source data to be updated as needed
+        logger.debug("App.loadSourcesHandler: called")
+        // process the source data
+        var verifiers = data.args[0]["verifiers"]
+        var sources = Object.assign(verifiers, data.args[0]["sources"])
+        this.sourceNames = Object.keys(sources)
+        // the following is executed after the timer fires
+        var changeTime = ()=>{
+            logger.debug(`App.loadSourcesHandler.changeTime: source time is ${this.sourceMonitorTime}`)
+            if (this.sourceMonitorTime === null){
+                logger.debug("App.loadSourcesHandler.changeTime called")
+                var time = new Date().toISOString()
+                this.getSources(time)
+            }
+        }
+        // this sets up the timer
+        this.timer = new PausableTimer(changeTime, this.sourceUpdateInterval)
+        this.timer.start()
+        logger.debug(`App.loadSourcesHandler: timer started for ${this.sourceUpdateInterval} s`)
+      },
+
+
+      getSourcesDataHandlerOld(data){
+        // processes response from the '"get_souces_data", [activity]' command
+        // which returns a structure that looks like:
+        // {sourcename: {}, sourcename: {}, ...}
+        // where the inner dicts have all the source attributes
+        var sources = data.args[0]
+        this.sourcesObject = sources
+        this.sourceNames = Object.keys(sources)
+        var source1name = this.sourceNames[0]
+        var source1 = this.sourcesObject[source1name]
+        logger.debug(`getSourcesDataHandler: first source is ${source1name}`)
+        var source1keys = Object.keys(source1)
+        logger.debug(`getSourcesDataHandler: first source keys are ${source1keys}`)
+        var source1info = source1['info']
+        var source1infoKeys = Object.keys(source1info)
+        logger.debug(`getSourcesDataHandler: first source info keys are ${source1infoKeys}`)
+        var key = source1info['key']
+        var cat = source1info['category']
+        var lbl = source1info['label']
+        logger.debug(`getSourcesDataHandler: key=${key}`)
+        logger.debug(`getSourcesDataHandler: cat=${cat}`)
+        logger.debug(`getSourcesDataHandler: lbl=${lbl}`)
+        logger.debug(`getSourcesDataHandler: fill=${source1info['fill']}`)
+        this.sources = this.sourcesObjectToSourceList(sources)
+      },
+
+
+      getSourcesOld(time){
+        // issues the 'get_sources' server command
+        logger.debug(`App.getSources: called for ${time}`)
+        this.serverCommand(
+            "get_sources",
+            [this.sourceNames],
+            {
+                when:time,
+                formatter:"%Y-%m-%dT%H:%M:%S.%fZ"
+            },
+            "get_sources_handler"
+        )
+      },
+

@@ -1,0 +1,415 @@
+<template>
+    <collapsable-panel header="Source Monitor" :noBorder="false" size="large">
+        <div class="container">
+          <div>
+            <panel header="Category" :noBorder="true" size="medium">
+                <!-- bind attribute 'contents' to property 'styles' -->
+                <rounded-check-button-list
+                    ref="category-list"
+                    :contents="styles" >
+                </rounded-check-button-list>
+            </panel>
+            <source-filter
+                ref="source-filter"
+                :elLimits="elLimits"
+                :azLimits="azLimits"
+                :fluxLimits="fluxLimits"
+                :obsLimits="obsLimits"
+                @setElLimits="setElLimits"
+                @setAzLimits="setAzLimits"
+                @setFluxLimits="setFluxLimits"
+                @setObsLimits="setObsLimits">
+            </source-filter>
+          </div>
+          <div ref="source-plot-container">
+            <d3-polar-plot
+                ref="source-plot"
+                @circle-click="onPolarPlotClick"
+                @circle-dbclick="onPolarPlotDblClick"
+                @circle-mouseover="onPolarPlotMouseOver"
+                @circle-mouseout="onPolarPlotMouseOut"
+                :circles="computedSources"
+                :circle-options="styles"
+                :width="computedWidth"
+                :height="computedHeight"
+                :key="computedRender">
+            </d3-polar-plot>
+          </div>
+          <div class="third-column-container">
+            <panel :noPad="true" :noBorder="true" :header="timeHeader()" size="medium">
+                <div class="planning-container">
+                    <label>Days</label><spin-box @spin-box-value="onDaysChange"></spin-box>
+                    <label>Hours</label><spin-box @spin-box-value="onHoursChange"></spin-box>
+                    <label>Minutes</label><spin-box @spin-box-value="onMinutesChange"></spin-box>
+                </div>
+                <div class="equal-row">
+                    <button @click="onTimeAccept">Advance</button>
+                    <button @click="onTimeNow">Now</button>
+                </div>
+            </panel>
+            <panel :noPad="true" :noBorder="true" header="Search" size="medium">
+                <drop-down-input
+                    :contents="sourceNames"
+                    @drop-down-click="($event)=>{setSourceInfo($event);setSourcePlotToolTip($event)}"
+                    ref="source-search">
+                </drop-down-input>
+            </panel>
+            <panel :noPad="true" :noBorder="true" header="Source Information" size="medium">
+                <source-info-display
+                    :sourceInfo="sourceInfo">
+                </source-info-display>
+            </panel>
+            <panel :noPad="true" :noBorder="true" header="Source Queue" size="medium">
+                <source-queue
+                    :styles="styles"
+                    :sourcesObject="sourcesObject"
+                    @source-dblclick="selectSourceForObservation">
+                </source-queue>
+            </panel>
+          </div>
+        </div>
+    </collapsable-panel>
+</template>
+
+
+<script>
+import Vue from "vue"
+import * as log from "loglevel"
+
+import CollapsablePanel from "./CollapsablePanel.vue"
+import Panel from "./Panel.vue"
+import PanelHeading from "./PanelHeading.vue"
+import RoundedCheckButtonList from "./RoundedCheckButtonList.vue"
+import InputDropDown from "./InputDropDown.vue"
+import SpinBox from "./SpinBox.vue"
+import SourceInfoDisplay from "./SourceInfoDisplay.vue"
+import SourceQueue from "./SourceQueue.vue"
+import D3PolarPlot from "./D3PolarPlot.js"
+import TableRow from "./TableRow.vue"
+import SourceFilter from "./SourceFilter.vue"
+
+var logger = log.getLogger("App")
+logger.debug("SourceMonitor: logger created")
+
+
+export default {
+    props:["styles",
+           "sources",
+           "sourcesObject",
+           "sourceNames",
+           "width",
+           "height",
+           "render"],
+    components:{
+        "panel":Panel,
+        "panel-heading":PanelHeading,
+        "collapsable-panel":CollapsablePanel,
+        "table-row":TableRow,
+        "rounded-check-button-list":RoundedCheckButtonList,
+        "d3-polar-plot":D3PolarPlot,
+        "drop-down-input":InputDropDown,
+        "spin-box":SpinBox,
+        "source-info-display":SourceInfoDisplay,
+        "source-queue":SourceQueue,
+        "source-filter":SourceFilter
+    },
+    beforeCreate(){
+      console.log(`SourceMonitor.beforeCreate: invoked`)
+    },
+    //created(){
+    //  console.log(`SourceMonitor.created: invoked`)
+    //  this.computedSources = this.filterSources(this.sources)
+    //  console.log(`SourceMonitor.created: computedWidth=${this.computedWidth}`)
+    //  console.log(`SourceMonitor.created: computedHeight=${this.computedHeight}`)
+    //  console.log(`SourceMonitor.created: elLimits=${this.elLimits}`)
+    //},
+    methods:{
+        test:function(){
+            console.log("SourceMonitor: hey")
+        },
+        generateTime: function(){
+            var now = new Date()
+            now.setDate(now.getDate() + this.days)
+            now.setHours(now.getHours() + this.hours)
+            now.setMinutes(now.getMinutes() + this.minutes)
+            return now
+        },
+        timeHeader: function(){
+            var date = this.generateTime()
+            return `Sources at ${date.toString()}`
+        },
+        reRenderSourcePlot: function(width, height){
+            this.computedWidth = width
+            this.computedHeight = height
+            if (this.computedRender == 0){
+                this.computedRender = 1
+            }else{
+                this.computedRender = 0
+            }
+        },
+        onResize: function(){
+            var renderedWidth = this.$refs["source-plot-container"].offsetWidth
+            this.reRenderSourcePlot(renderedWidth, renderedWidth)
+        },
+        togglePlotCategories: function(value, hidden){
+            console.log(`SourceMonitor.togglePlotCategories: ${value} set to ${hidden}`)
+            this.categoriesToDisplay[value] = hidden
+            this.computedSources = this.filterSources(this.sources)
+        },
+        setSourceInfo: function(sourceName){
+            if (sourceName in this.sourcesObject){
+                this.sourceInfo = this.sourcesObject[sourceName]
+                //if (this.sourceInfo.category === "catalog-sources"){
+                if(this.sourceInfo.category.includes("catalog-")){
+                    console.log(this.calculateTotalObservationTime(this.sourceInfo))
+                }
+            }
+        },
+        setSourcePlotToolTip: function(sourceName){
+            var node = this.findPolarPlotNodeByName(sourceName).node()
+            if (node !== null){
+                this.$refs["source-plot"].tooltipClick.show(this.sourceInfo, 0, [node])
+            }
+        },
+        selectSourceForObservation(source){
+            this.$emit("select-source-for-observation", source)
+        },
+        onPolarPlotClick: function(d){
+            // console.log(`SourceMonitor.onPolarPlotClick: ${d.name}`)
+            // console.log(`SourceMonitor.onPolarPlotClick: ${JSON.stringify(d)}`)
+        },
+        onPolarPlotDblClick: function(d, i, node){
+            // console.log(`SourceMonitor.onPolarPlotDblClick: ${JSON.stringify(d)}`)
+            var name = d.name
+            this.setSourceInfo(name)
+        },
+        onPolarPlotMouseOver:function(d){
+            // console.log(`SourceMonitor.onPolarPlotMouseOver: ${JSON.stringify(d)}`)
+        },
+        onPolarPlotMouseOut: function(d){
+            // console.log(`SourceMonitor.onPolarPlotMouseOut: ${JSON.stringify(d)}`)
+        },
+        onDaysChange: function(val){
+            this.days = val
+            this.$emit("time-change", this.generateTime())
+        },
+        onHoursChange: function(val){
+            this.hours = val
+            this.$emit("time-change", this.generateTime())
+        },
+        onMinutesChange: function(val){
+            this.minutes = val
+            this.$emit("time-change", this.generateTime())
+        },
+        onTimeAccept: function(){
+            this.$emit("time-change", this.generateTime())
+        },
+        onTimeNow: function(){
+            this.$emit("time-change", null)
+        },
+        calculateTotalObservationTime: function(source){
+            var totalTime = 0.0
+            var obsData = source.info.obs_data
+            if (obsData !== undefined){
+                obsData.forEach((sessionInfo)=>{
+                    if ("integ" in sessionInfo){
+                        var integ = parseFloat(sessionInfo.integ)
+                        if (!isNaN(integ)){
+                            totalTime += integ
+                        }
+                    }
+                })
+            }
+            return totalTime
+        },
+        filterElevation: function(d){
+            //console.log("SourceMonitor.filterElevation: entered")
+            //console.log(`SourceMonitor.filterElevation: elLimits=${this.elLimits}`)
+            if (this.elLimits.length === 0){
+                return true
+            }
+            if (d.el >= this.elLimits[0] && d.el <= this.elLimits[1]){
+                return true
+            }
+            //console.log(`SourceMonitor.filterElevation: elev is ${d.el}`)
+            return false
+        },
+        filterAzimuth: function(d){
+            //console.log("SourceMonitor.filterAzimuth: entered")
+            if (this.azLimits.length === 0){
+                return true
+            }
+            if (d.az >= this.azLimits[0] && d.az <= this.azLimits[1]){
+                return true
+            }
+            //console.log(`SourceMonitor.filterElevation: azim is ${d.az}`)
+            return false
+        },
+        filterFlux: function(d){
+            //console.log(`SourceMonitor.filterFlux: source is ${d.name}`)
+            //console.log(`SourceMonitor.filterFlux: properties are ${Object.keys(d)}`)
+            //console.log(`SourceMonitor.filterFlux: source category is ${d.category}`)
+            if (d.category === "calibrators"){
+                //console.log(`SourceMonitor.filterFlux: ${d.name} is a calibrator`)
+                if ("flux" in d.info){
+                    var kBandFlux = parseFloat(d.info.flux.K)
+                    console.log(`SourceMonitor.filterFlux: ${d.name} flux is ${kBandFlux}`)
+                    if (kBandFlux !== 0 && kBandFlux < this.fluxLimits[0] || kBandFlux > this.fluxLimits[1]){
+                        return false
+                    }
+                }
+            }
+            return true
+        },
+        filterObsTime: function(d){
+            //if (d.category === "catalog-sources"){
+            if (d.category.includes("catalog-")){
+                var totalObsTime = this.calculateTotalObservationTime(d)
+                //console.log(`SourceMonitor.filterObsTime: totalObsTime is ${totalObsTime}`)
+                if (totalObsTime < this.obsLimits[0] || totalObsTime > this.obsLimits[1]){
+                    console.log(`SourceMonitor.filterObsTime: ${d.name} rejected`)
+                    return false
+                }
+            }
+            return true
+        },
+        filterCategory: function(d){
+            console.log(`SourceMonitor.filterCategory: ${d.category}`)
+            return this.categoriesToDisplay[d.category]
+        },
+        filterSources: function(sourceList){
+            var sl = sourceList
+            //console.log(`SourceMonitor.filterSources: entered with ${sl}`)
+            console.log(`SourceMonitor.filterSources: displayed categories are:`)
+            Object.keys(this.categoriesToDisplay).forEach((category)=>{
+              console.log(`SourceMonitor.filterSources: display ${category} is ${this.categoriesToDisplay[category]}`)
+            })
+            var newSourceList = []
+            sourceList.forEach((d)=>{
+                console.log(`SourceMonitor.filterSources: testing ${d.name}`)
+                if (this.filterElevation(d) && this.filterAzimuth(d) &&
+                    this.filterFlux(d) && this.filterObsTime(d) &&
+                    this.filterCategory(d)){
+                    newSourceList.push(d)
+                }
+            })
+            console.log(`SourceMonitor.filterSources: returns ${newSourceList}`)
+            return newSourceList
+        },
+        setElLimits: function(idx, value){
+            //console.log(`SourceMonitor: setElLimits: ${idx} ${value}`)
+            Vue.set(this.elLimits, idx, value)
+        },
+        setAzLimits: function(idx, value){
+            //console.log(`SourceMonitor: setAzLimits: ${idx} ${value}`)
+            Vue.set(this.azLimits, idx, value)
+        },
+        setFluxLimits: function(idx, value){
+            //console.log(`SourceMonitor: setFluxLimits: ${idx} ${value}`)
+            Vue.set(this.fluxLimits, idx, value)
+        },
+        setObsLimits: function(idx, value){
+            //console.log(`SourceMonitor: setObsLimits: ${idx} ${value}`)
+            Vue.set(this.obsLimits, idx, value)
+        },
+        findPolarPlotNodeByName: function(name){
+            var filterFn = (d)=>{return name === d.name}
+            return this.$refs["source-plot"].filterNode(filterFn)
+        },
+        startTimers: function(){}
+    },
+    mounted: function(){
+        this.onResize()
+        window.addEventListener('resize', this.onResize)
+        this.$refs["category-list"].$on("toggle", (evtData)=>{
+            this.togglePlotCategories(evtData.value, evtData.hidden)
+        }
+      )
+      console.log(`SourceMonitor.mounted: computedWidth=${this.computedWidth}`)
+      console.log(`SourceMonitor.mounted: computedHeight=${this.computedHeight}`)
+      console.log(`SourceMonitor.mounted: elLimits=${this.elLimits}`)
+    },
+    data:function(){
+        console.log("SourceMonitor.data: started")
+        console.log("SourceMonitor.data: refs object:")
+        console.log(this.$refs)
+        var categoriesToDisplay = {}
+        Object.keys(this.styles).forEach((category)=>{
+            console.log(`SourceMonitor.data: ${category}`)
+            categoriesToDisplay[category] = true
+        })
+        return {
+            sourceInfo: {},
+            elLimits: [18,88],
+            azLimits: [0,360],
+            fluxLimits: [0,30],
+            obsLimits: [0,120],
+            computedWidth: this.width,
+            computedHeight: this.height,
+            computedRender: this.render,
+            computedWidth: 0,
+            computedHeight: 0,
+            computedRender: 0,
+            computedSources: null,
+            "categoriesToDisplay": categoriesToDisplay,
+            days: 0,
+            hours: 0,
+            minutes: 0
+        }
+    },
+    watch:{
+        sources: function(newSources){
+            var ns = newSources
+            console.log(`SourceMonitor.watch.sources: called with ${ns}`)
+            this.computedSources = this.filterSources(this.sources)
+        },
+        elLimits: function(newLimits){
+            this.computedSources = this.filterSources(this.sources)
+        },
+        azLimits: function(newLimits){
+            this.computedSources = this.filterSources(this.sources)
+        },
+        fluxLimits: function(newLimits){
+            this.computedSources = this.filterSources(this.sources)
+        },
+        obsLimits: function(newLimits){
+            this.computedSources = this.filterSources(this.sources)
+        },
+        width: function(newWidth){
+            this.computedWidth = newWidth
+        },
+        height:function(newHeight){
+            this.computedHeight = newHeight
+        },
+        render:function(newRender){
+            this.computedRender = newRender
+        }
+    }
+}
+</script>
+
+<style scoped>
+
+.container {
+    display: grid;
+    grid-template-columns: 2fr 6fr 2fr;
+    grid-gap: 0.5rem 0.5rem;
+}
+
+.planning-container {
+    display: grid;
+    grid-template-columns: 0.4fr 1fr;
+    grid-gap: 0.5rem;
+    margin-bottom: 0.5rem;
+}
+
+.equal-row {
+    display: grid ;
+    grid-template-columns: 1fr 1fr;
+}
+
+.third-column-container {
+
+}
+
+</style>

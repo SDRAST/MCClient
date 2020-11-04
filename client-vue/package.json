@@ -1,0 +1,66 @@
+{
+  "name": "dss-monitor-control",
+  "version": "1.6.0",
+  "description": "\"Web controller for DSS antennae, using Vue.js\"",
+  "main": "index.html",
+  "scripts": {
+    "test": "mocha-webpack --webpack-config webpack.config.test.js --require test/setup.js \"test/**/*.spec.js\"",
+    "test:watch": "mocha-webpack --watch --webpack-config webpack.config.test.js --require test/setup.js \"test/**/*.spec.js\"",
+    "..test": "webpack --module-bind 'mocha-loader!./test' --output testBundle.js --config webpack.config.dev.js",
+    "build:dev": "date -u; webpack --config webpack.config.dev.js",
+    "build:prod": "webpack --config webpack.config.prod.js",
+    "watch": "webpack --watch --config webpack.config.dev.js"
+  },
+  "author": "Dean Shaff",
+  "license": "ISC",
+  "dependencies": {
+    "d3": "^5.0.0",
+    "mocha-webpack": "^1.1.0",
+    "moment": "^2.22.2",
+    "octicons": "^7.2.0",
+    "skeleton-framework": "^1.0.10",
+    "socket.io": "^2.1.0",
+    "vue": "^2.5.16",
+    "vue-google-charts": "^0.3.2",
+    "vue-slider-component": "^3.0.32"
+  },
+  "devDependencies": {
+    "babel-core": "^6.26.3",
+    "babel-eslint": "^8.2.2",
+    "babel-loader": "^7.1.4",
+    "babel-preset-es2015-node5": "^1.2.0",
+    "babel-preset-import-export": "^1.0.2",
+    "chai": "^4.1.2",
+    "colors.css": "^3.0.0",
+    "cross-env": "^5.2.0",
+    "css-loader": "^2.1.1",
+    "eslint": "^4.19.1",
+    "eslint-config-google": "^0.9.1",
+    "eslint-loader": "^2.0.0",
+    "jsdom": "^11.11.0",
+    "jsdom-global": "^3.0.2",
+    "loglevel": "^1.6.1",
+    "mini-css-extract-plugin": "^0.4.0",
+    "mocha": "^5.2.0",
+    "mocha-loader": "^2.0.1",
+    "mocha-webpack": "^1.1.0",
+    "npm-watch": "^0.3.0",
+    "null-loader": "^0.1.1",
+    "style-loader": "^0.20.3",
+    "vue-loader": "^15.2.4",
+    "vue-style-loader": "^4.1.0",
+    "vue-template-compiler": "^2.5.21",
+    "webpack": "^4.28.3",
+    "webpack-cli": "^3.2.0",
+    "webpack-command": "^0.3.0",
+    "webpack-dev-server": "^3.1.4",
+    "winston": "^2.4.1"
+  },
+  "directories": {
+    "test": "test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git@ra.jpl.nasa.gov:RadioAstronomy/dss-monitor-control_client-vue-exp.git"
+  }
+}

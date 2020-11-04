@@ -1,0 +1,577 @@
+<!-- This is the original App.vue for a single page browser client
+
+When the page has been compiled, the 'created(){...}' section of the script is
+called.  It calls 'initSocket()'.  If a socket has not yet been created then
+it is created and 'registerSocketHandlers()' is called. In any case it emits
+'hostname' on the socket.
+
+The socket handlers are:
+  "hostname":            hostNameHandler
+  "set_info_handler":    setInfoHandler
+  "load_sources_handler: loadSourcesHandler
+  "get_sources_handler": getSourcesHandler
+  'get_info_handler':    getInfoHandler
+  "roachnames_handler":  roachNameHandler
+
+The socket handler for the 'hostname' server command is processed by
+'hostNameHandler' which:
+  - calls 'hostNameConfig' to set paths and filenames appropriate to this host
+  - sends the server commands 'set_info', 'load_sources', 'get_info", and
+    'hdwr' with these callbacks which are serviced by handlers shown above.
+    These functions:
+    setInfoHandler:     does nothing
+    loadSourcesHandler: - gets sources and verifiers and merges their names into
+                          var 'sourceNames'
+                        - calls internal function 'change_time' if
+                          'sourceMonitorTime' has not yet been set,
+                          initializes 'sourceMonitorTime()' and calls
+                          'getSources()'
+                        - sets the timer to fire in 'sourceUpdateTime' msec,
+                          after which it calls 'change_time' which then does
+                          nothing except restart the timer, unless
+                          'sourceMonitorTime' has been set to 'null'
+    getInfoHandler:     loads server info into 'serverInfo'
+    roachNameHandler:   loads ROACH names from server into 'roachNames'
+
+There is a 'watch' defined for these variables:
+  "port":                  calls 'initSocket()'
+  "domain":                calls 'initSocket()'
+  "sourceMonitorTime"      calls 'getSources(time)' for the new time
+  "sourceForObservation":  calls 'formatSourceForObservation(source)'
+
+Method 'getSources(time)' sends the server command "get_sources" with additional
+optional parameters:
+  source_names: (list/str) A list of the names of sources for which to get az/el
+  when:         (datetime.datetime/ephem.Date/str) A date time object,
+                ephem date, or string that indicates when we should calculate
+                source coordinates. Defaults to now. If string, then argument
+                'formatter' must be included.
+  filter_fn:    (callable) A function used to filter out sources.
+  formatter:    (str) Used with datetime.datetime.strptime() to form datetime
+                object when `when` is string.
+The server returns dictionary whose keys are source names, and values are
+dictionaries. See documentation for method 'get_sources()' of class
+'DSSServer'. The effect in the browser is to display the sources with new
+azimuths and elevations in the plot.
+
+The SourceMonitor object 'source_monitor' can trigger two events that trigger
+calls to these respective functions:
+  time-change:                   onSourceMonitorTimeChange(time), which sets
+                                 'sourceMonitorTime' to the new time
+  select-source-for-observation: onSelectSourceForObservation(), which changes
+                                 'sourceForObservation'
+Both trigger 'watch' functions.
+ -->
+<template>
+    <div class="main">
+    <!-- <status-bar
+        :status="status"
+        :sourceForObservation="sourceForObservation">
+    </status-bar>
+    -->
+    <center>
+      Client host time: {{thisHostTime}}
+    </center>
+    <h4>DSS<code>{{station}}</code> Monitor and Control</h4>
+    <div class="app-container">
+        <!-- bind variable 'sourcePlot' attribute 'styles' to property 'styles';
+            variable 'sourcePlot' is defined in 'data' -->
+        <source-monitor
+            class="source-monitor"
+            ref="source-monitor"
+            @time-change="onSourceMonitorTimeChange"
+            @select-source-for-observation="onSelectSourceForObservation"
+            :sources="sources"
+            :sourcesObject="sourcesObject"
+            :styles="sourcePlot.styles"
+            :sourceNames="sourceNames"
+            :width="sourcePlot.width"
+            :height="sourcePlot.height"
+            :render="sourcePlot.render">
+        </source-monitor>
+        <div class="power-meter-monitor">
+            <power-meter-monitor
+                ref="power-meter-monitor"
+                :socket="socket">
+            </power-meter-monitor>
+        </div>
+        <div class="antenna-monitor">
+            <antenna-monitor
+                ref="antenna-monitor"
+                :socket="socket">
+            </antenna-monitor>
+        </div>
+        <antenna-control
+            class="antenna-control"
+            :socket="socket"
+            :sourceForObservation="sourceForObservation">
+        </antenna-control>
+        <!-- <div class="spectrometer-calibration">
+            <spectrometer-calibration
+                :socket="socket"
+                :ROACHNames="ROACHNames">
+            </spectrometer-calibration>
+        </div>
+      -->
+        <div class="nodding">
+            <nodding
+                :socket="socket"
+                :sourceForObservation="sourceForObservation"
+                @nodding="onNodding">
+            </nodding>
+        </div>
+        <!-- <input type="text" v-model="socketPortModel" @keyup.enter="onSocketPortChange(socketPortModel)">
+        <button @click="onSocketPortChange(socketPortModel)">Connect</button> -->
+    </div>
+    <p>
+        version: {{version}}
+    </p>
+    </div>
+</template>
+
+
+
+<script>
+import io from "socket.io-client"
+import Vue from "vue"
+import * as log from "loglevel"
+
+//import PausableTimer from "./../pausable_timer.js"
+
+import SourceMonitor from "./SourceMonitor.vue"
+import PowerMeterMonitor from "./PowerMeterMonitor.vue"
+import AntennaMonitor from "./AntennaMonitor.vue"
+import AntennaControl from "./AntennaControl.vue"
+//import FluxCalibration from "./FluxCalibration.vue"
+//import BoresightCalibration from "./BoresightCalibration/BoresightCalibration.vue"
+//import SpectrometerCalibration from "./SpectrometerCalibration.vue"
+import Nodding from "./Nodding.vue"
+import Panel from "./Panel.vue"
+//import StatusBar from "./StatusBar.vue"
+import SocketIOMixin from "./SocketIOMixin.vue"
+
+var logger = log.getLogger("App") // this must have the name of the App, not
+                                  // the component
+logger.debug("AppOld: logger created")
+
+export default {
+    props:{
+        domain:            {type: String, default: "localhost"},
+        port:              {type: Number, default: 5000},
+        version:           {type: String, default: ""},
+        author:            {type: String, default: ""},
+        thisHostTime:      {type: String, default: ""},
+        socket:            {type: Object, default: null},
+        registeredPorts:   {type: Object, default: null},
+        sourcePlot:        {type: Object, default: null},
+        sourceMonitorTime: {type: Object, default: null},
+        sources:           {type: Array,  default: () => []},
+        sourcesObject:     {type: Object, default: null},
+        sourceNames:       {type: Array,  default: () => []}
+    },
+    components:{
+        "source-monitor":SourceMonitor,
+        "power-meter-monitor":PowerMeterMonitor,
+        "antenna-monitor": AntennaMonitor,
+        "antenna-control": AntennaControl,
+        //"boresight-calibration":BoresightCalibration,
+        //"flux-calibration":FluxCalibration,
+        //"spectrometer-calibration":SpectrometerCalibration,
+        "nodding":Nodding,
+        // "status-bar": StatusBar,
+        // "panel":Panel
+    },
+    created(){
+        logger.debug("AppOld.created invoked");
+        document.title = "Legacy Page";
+        this.initSocket();
+    },
+    //mounted(){
+    //    logger.debug("AppOld.mounted invoked")
+  //      bus.$on("antenna-monitor:monitor-data", this.setAntennaMonitorData)
+  //    bus.$on("status:change", this.setStatus)
+  //  },
+    methods:{
+        //serverCommand: SocketIOMixin.methods.serverCommand,
+        //getPort: SocketIOMixin.methods.getPort,
+        //checkIfRegistered: SocketIOMixin.methods.checkIfRegistered,
+        //registerPort: function(socketOrPort){
+        //    var port = this.getPort(socketOrPort)
+        //    this.socketPort = port
+        //    this.registeredPorts[port] = true
+        //},
+        onSelectSourceForObservation(source){
+            logger.debug(`selectSourceForObservation: ${source.name}`)
+            this.sourceForObservation = source
+        },
+        //setAntennaMonitorData(antennaMonitorData){
+    //        logger.debug(`setAntennaMonitorData: ${JSON.stringify(antennaMonitorData)}`)
+      //      var circleData = {
+    //            "az":parseFloat(antennaMonitorData["AzimuthAngle"], 10),
+    //            "el":parseFloat(antennaMonitorData["ElevationAngle"], 10),
+    //            "ra":0.0,
+    //            "dec":0.0,
+    //            "info":{
+    //                "name":"Antenna",
+    //                "category":["antenna"]
+    //            },
+    //            "category":"antenna"
+    //        }
+    //        Vue.set(this.sourcesObject, "Antenna", circleData)
+            // take array sources and for each source (obj) return its name
+  //          var names = this.sources.map((obj)=>{obj.name})
+    //        var idxAntenna = names.indexOf("Antenna")
+    //        this.sources.splice(idxAntenna, 1)
+  //          this.sources.push(circleData)
+  //      },
+        setStatus: function(newStatus){
+            // logger.debug(`AppOld.setStatus for ${newStatus}`)
+            this.status = newStatus
+        },
+        formatSourceForObservation: function(sourceObject){
+            if (sourceObject === null){first
+                return
+            }
+            var name = sourceObject.name
+            var category = sourceObject.category
+            return `<span style="color:${this.sourcePlot.styles[category].fill};">${sourceObject.name}</span>`
+        },
+        initSocket: function(){
+            logger.debug(`AppOld.initSocket: called with socket = ${this.socket}`)
+            //if (this.socket === null || ! this.checkIfRegistered(this.socket)){
+            //    this.socket = io.connect(`http://${this.socketDomain}:${this.socketPort}`)
+            //    this.registerPort(this.socket)
+            // this.registerSocketHandlers()
+            //}
+            this.socket.on("connect", ()=>{
+                logger.debug(`AppOld.initSocket: connected to ${this.socketPort}`)
+                this.socket.emit("hostname")
+                bus.$emit(
+                    "status:change",
+                    `client connected on port ${this.socketPort}`
+                )
+            })
+        },
+        //sourcesObjectToSourceList:function(sourcesObject){
+      //      var categoryLookup = (category)=>{
+      //          var mapping = {
+      //              "kn maser": "kn-masers",
+      //              "catalog":"catalog-sources",
+      //              "antenna":"antenna",
+      //              "calibrator": "calibrators",
+      //              "priority 1":"priority-1",
+      //              "priority 2":"priority-2",
+      //              "priority 3":"priority-3",
+      //              "priority 4":"priority-4",
+      //          }
+      //          var categoryStr = []
+      //          if (! Array.isArray(category)){
+      //              category = [category]
+    //          }
+      //          category.forEach((subCategory)=>{
+      //              categoryStr.push(mapping[subCategory])
+    //            })
+    //            return categoryStr.join("-")
+    //        }
+//
+      //      var convert = 180. / Math.PI
+      //      var data = []
+      //      Object.keys(sourcesObject).forEach((srcName)=>{
+      //          var src = sourcesObject[srcName]
+      //          src.name = srcName
+      //          if (src.name !== "Antenna"){
+      //              src.az = src.az * convert
+      //              src.el = src.el * convert
+      //          }
+      //          src.category = categoryLookup(src.info.category)
+      //          data.push(src)
+      //      })
+      //      return data
+      //  },
+      //  getSources(time){
+      //      logger.debug(`AppOld.getSources:time is ${time}`)
+      //      this.serverCommand(
+      //          "get_sources",
+      //          [this.sourceNames],
+      //          {
+      //              when:time,
+      //              formatter:"%Y-%m-%dT%H:%M:%S.%fZ"
+      //          },
+      //          "get_sources_handler"
+      //      )
+      //  },
+        //loadSourcesHandler(data){
+        //    logger.debug("AppOld.loadSourcesHandler: called")
+        //    var verifiers = data.args[0]["verifiers"]
+        //    var sources = Object.assign(verifiers, data.args[0]["sources"])
+      //      this.sourceNames = Object.keys(sources)
+        //    var changeTime = ()=>{
+        //        if (this.sourceMonitorTime === null){
+      //              logger.debug("AppOld.loadSourcesHandler.changeTime called")
+      //              var time = new Date().toISOString()
+      //              this.getSources(time)
+      //          }
+      //      }
+      //      this.timer = new PausableTimer(changeTime, this.sourceUpdateTime)
+      //      this.timer.start()
+      //  },
+      //  getSourcesHandler(data){
+      //      logger.debug("AppOld.getSourcesHandler: called")
+      //      var sources = data.args[0]
+    //        this.sourcesObject = sources
+    //        this.sources = this.sourcesObjectToSourceList(sources)
+    //    },
+    //    roachNameHandler(data){
+  //          logger.debug(`AppOld.roachNameHandler: called`)
+  //          var ROACHNames = data.args[0]
+    //        this.ROACHNames = ROACHNames
+  //    },
+    //    hostNameHandler(data){
+    //        var hostName = data
+    //        logger.debug(`AppOld.hostNameHandler: hostName: ${hostName}`)
+    //        bus.$emit("status:change", `Remote host name: ${hostName}`)
+    //        var sourceDir = this.hostNameConfig[hostName]
+    //        this.serverCommand(
+    //            "set_info",[["project","source_dir"],sourceDir],{},"set_info_handler")
+    //        this.serverCommand(
+    //            "load_sources",[],{},"load_sources_handler")
+    //        this.serverCommand(
+    //            "get_info",[],{},"get_info_handler")
+    //        this.serverCommand(
+    //            "hdwr", ["Backend", "roachnames"], {}, "roachnames_handler")
+    //    },
+        //registerSocketHandlers(){
+        //    logger.debug(`AppOld.registerSocketHandlers called`)
+            //this.socket.on("set_info_handler", this.setInfoHandler)
+        //    this.socket.on("load_sources_handler", this.loadSourcesHandler)
+        //    this.socket.on("get_sources_handler", this.getSourcesHandler)
+            //this.socket.on("get_info_handler", this.getInfoHandler)
+        //    this.socket.on("roachnames_handler", this.roachNameHandler)
+        //},
+        //onSocketPortChange(newPort){
+      //      this.socketPortModel = parseInt(newPort)
+      //      this.socketPort = this.socketPortModel
+      //      this.initSocket()
+      //  },
+        onSourceMonitorTimeChange(newTime){
+            // in the event that <source-monitor> property 'time-change'
+            // happens
+            logger.debug(`AppOld.onSourceMonitorTimeChange: called for ${newTime}`)
+            this.sourceMonitorTime = newTime
+        },
+        onNodding(flag){
+            // in the event that <nodding> property 'nodding' changes
+            if (flag){
+                this.$refs["power-meter-monitor"].pauseTimers()
+                this.$refs["antenna-monitor"].pauseTimers()
+            }else{
+                this.$refs["power-meter-monitor"].unPauseTimers()
+                this.$refs["antenna-monitor"].unPauseTimers()
+            }
+        }
+    },
+    watch: {
+        port: function(){
+            // logger.debug("AppOld: socket port changed")
+            this.socketPort = this.port
+            this.initSocket()
+        },
+        domain: function(){
+            logger.debug("AppOld: domain changed")
+            this.socketDomain = this.domain
+            this.initSocket()
+        },
+        //sourceMonitorTime: function(){
+        //    logger.debug("AppOld: sourceMonitorTime changed")
+        //    var date = this.sourceMonitorTime
+        //    if (this.sourceMonitorTime === null){
+        //        date = new Date()
+        //    }
+        //    this.getSources(date.toISOString())
+        //},
+        sourceForObservation(){
+            logger.debug("AppOld: source for observation changed")
+            this.sourceForObservation.formatted = this.formatSourceForObservation(
+                                                      this.sourceForObservation)
+        }
+    },
+    data: function(){
+        var port = this.port
+        logger.debug(`AppOld.data: data function called with port: ${port}`)
+        logger.debug("AppOld.data: refs object:")
+        logger.debug(this.$refs) // show refs defined in context 'main'
+        return {
+            station: 43,
+            status: "hello!",
+            //sources: [],
+            //sourcesObject: {},
+            //sourceNames: [],
+            sourcePlotNotNeeded:{
+                styles: {
+                    "calibrators":{
+                        class:"scatter calibrators",
+                        fill:"#B10DC9",
+                        opacity:0.8,
+                        r:(d)=>{
+                            var flux = parseFloat(d.info.flux.K)
+                            if (flux === undefined || isNaN(flux)){
+                                flux = 0.0
+                            }
+                            flux += 3.0
+                            return flux
+                        },
+                        display:"Calibrators"
+                    },
+                    "known-masers":{
+                        class:"scatter known-masers",
+                        fill:"#FF851B",
+                        opacity:0.8,
+                        r:8,
+                        display:"Known Masers"
+                    },
+                    "catalog-sources-priority-1":{
+                        class:"scatter catalog-sources priority-1",
+                        fill:"#001f3f",
+                        opacity:0.8,
+                        r:8,
+                        display:"Priority 1"
+                    },
+                    "catalog-sources-priority-2":{
+                        class:"scatter catalog-sources priority-2",
+                        fill:"#0074D9",
+                        opacity:0.8,
+                        r:8,
+                        display:"Priority 2"
+                    },
+                    "catalog-sources-priority-3":{
+                        class:"scatter catalog-sources-priority-3",
+                        fill:"#7FDBFF",
+                        opacity:0.8,
+                        r:8,
+                        display:"Priority 3"
+                    },
+                    "catalog-sources-priority-4":{
+                        class:"scatter catalog-sources-priority-4",
+                        fill:"#39CCCC",
+                        opacity:0.8,
+                        r:8,
+                        display:"Priority 4"
+                    },
+                    "antenna":{
+                        class:"scatter antenna",
+                        fill:"#FF4136",
+                        opacity:0.8,
+                        r:12,
+                        display:"Antenna"
+                    },
+                    __order__:[
+                                "calibrators",
+                                "known-masers",
+                                "catalog-sources-priority-1",
+                                "catalog-sources-priority-2",
+                                "catalog-sources-priority-3",
+                                "catalog-sources-priority-4",
+                                "antenna"
+                    ]
+                },
+                filters:{
+                    el: (val)=>{
+                        if (val < 0){
+                            return false
+                        } else {
+                            return true
+                        }
+                    },
+                    az: (val)=>true,
+                    flux: (val)=>true
+                },
+                width: 300,
+                height: 300,
+                render: 0
+            },
+            //hostNameConfig:{
+            //    "dean-ThinkPad-T460": "/home/dean/jpl-dsn/projects_TAMS",
+            //    "enceladus": "/home/dean/work/tams/project_TAMS",
+            //    "crux1": "/home/ops/projects/TAMS",
+            //    "crux": "/home/ops/projects/TAMS",
+            //    "kuiper": "/usr/local/projects/TAMS"
+            //},
+            // sourceUpdateTime: 4*60*1000,
+            sourceForObservation:null,
+            socketPort: port,
+            socketPortModel: port,
+            socketDomain: this.domain,
+            // registeredPorts: {port: false},
+            // socket: null,
+            ROACHNames: []
+        }
+    }
+}
+</script>
+
+<style scoped>
+/* Grid Styling */
+.app-container {
+    display: grid;
+    grid-template-rows: 0.5fr repeat(calc(var(--rows)-1), minmax(0.5fr, 1fr));
+    grid-template-columns: repeat(var(--columns), 1fr);
+    grid-gap: 0.5rem 0.5rem;
+}
+
+.source-monitor {
+    grid-column: 1 / calc(1 + var(--columns));
+    grid-row: 1 / 1;
+}
+
+/* .source-for-observation{
+    grid-column: 1 / calc(1 + var(--columns));
+    grid-row: 2 / 2;
+} */
+
+.power-meter-monitor{
+    grid-column: 1 / 3;
+    grid-row: 2 / 2;
+}
+
+.antenna-monitor{
+    grid-column: 3 / 4;
+    grid-row: 2 / 2;
+}
+
+.antenna-control{
+    grid-column: 4 / calc(1 + var(--columns));
+    grid-row: 2 / 2;
+}
+
+/* .boresight-calibration{
+    grid-column: 1 / calc(1 + var(--columns));
+    grid-row: 3 / 3;
+}
+
+.flux-calibration{
+    grid-column: 1 / 2;
+    grid-row: 4 / 4;
+}
+
+.spectrometer-calibration{
+    grid-column: 2 / calc(var(--columns));
+    grid-row: 4 / 4;
+} */
+
+.nodding {
+    grid-column: 4 / 5;
+    grid-row: 4 / 4;
+}
+
+</style>
+
+<style>
+.scrollable-parent {
+    overflow: hidden;
+}
+
+.scrollable-child {
+    max-height: 350px;
+    overflow-y: scroll;
+}
+</style>

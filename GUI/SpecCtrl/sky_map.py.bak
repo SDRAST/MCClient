@@ -1,0 +1,857 @@
+#TODO-
+# to clean up this code; perform unit test.
+import ephem
+import datetime
+#import novas #not sure if i really need this???
+from Plotter import PlotDef
+
+from Observatory.GUI import threaded
+ThreadInit = threaded.ThreadInit
+
+from PyQt4 import QtCore, QtGui
+import numpy
+#from matplotlib.lines import Line2D
+from matplotlib.transforms import offset_copy
+"""
+from matplotlib.projections import PolarAxes, register_projection
+from matplotlib.transforms import Affine2D, Bbox, IdentityTransform
+"""
+from matplotlib import rc
+debug = 0
+"""
+import numpy as np
+import  mpl_toolkits.axisartist.angle_helper as angle_helper
+from matplotlib.projections import PolarAxes, HammerAxes, MollweideAxes, AitoffAxes, LambertAxes
+from matplotlib.transforms import Affine2D
+from mpl_toolkits.axisartist import SubplotHost
+from mpl_toolkits.axisartist import GridHelperCurveLinear
+from matplotlib.patches import Rectangle
+from matplotlib.text import Text
+from matplotlib.image import AxesImage
+import matplotlib.cm as cm
+from mpl_toolkits.mplot3d import Axes3D
+from matplotlib.ticker import LinearLocator
+from matplotlib.ticker import MultipleLocator, FormatStrFormatter
+"""
+
+"""
+Observatory info
+"""
+cdscc = ephem.Observer()
+#cdscc.long, cdscc.lat, cdscc.elevation = '211.019942862', '-35.403983527', 688.867
+cdscc.long, cdscc.lat, cdscc.elevation = '148.980057138', '-35.403983527', 688.867
+#cdscc.long, cdscc.lat, cdscc.elevation = '148.8541944', '-35.403983527', 600
+
+#No refraction correction
+cdscc.pressure = 0
+cdscc.epoch = ephem.J2000
+cdscc.date = datetime.datetime.utcnow()
+
+class PlotSkymap(PlotDef):
+    def __init__(self, ui, logfile):
+        PlotDef.__init__(self, ui, logfile)
+        self.annotation = 'xxx'
+        self.timer5= QtCore.QTimer()
+        self.timer5.start(1000)
+        self.mpl_connect8()
+        self.mpl_connect9()
+        self.mpl_connect10()
+        self.plot_definitions()
+#        self.canvas8.axes8.xaxis.set_major_locator(MultipleLocator(20))
+#        self.canvas8.axes8.xaxis.set_major_formatter(FormatStrFormatter('%d'))
+#        self.canvas8.axes8.xaxis.set_minor_locator(MultipleLocator(5))
+#        self.canvas8.axes8.yaxis.set_major_locator(MultipleLocator(0.5))
+#        self.canvas8.axes8.yaxis.set_minor_locator(MultipleLocator(0.1))
+#        self.canvas8.axes8.xaxis.grid(True,'minor')
+#        self.canvas8.axes8.yaxis.grid(True,'minor')
+#        self.canvas8.axes8.xaxis.grid(True,'major',linewidth=2)
+#        self.canvas8.axes8.yaxis.grid(True,'major',linewidth=2)
+#        #self.axes8.minorticks_on()
+#        self.canvas8.axes8.tick_params(direction='out', length=6, width=2, colors='r')
+#        self.canvas8.axes8.grid(which='major', axis='x', color='blue', linestyle='--')
+#        self.canvas8.axes8.grid(which='minor', axis='x', color='grey', linestyle='--')
+#        self.canvas8.axes8.grid(which='major', axis='y', color='green', linestyle='--')
+        #self.axes8.grid(which='minor', axis='y', color='grey', linestyle='--')
+       # self.axes8_1x = self.axes8.twinx()
+        #self.axes8_1x.grid(which='major', axis='y', color='red', linestyle='--')
+        #self.axes8_2 = self.axes8.twiny()
+        self.canvas8.mpl_connect('pick_event', self.source_pick)
+        self.onclick = self.canvas8.mpl_connect('button_press_event', self.onclick)
+#        self.scroll = self.canvas8.mpl_connect('scroll_event', self.scroll)
+
+        QtCore.QObject.connect(self.ui.pick_source, QtCore.SIGNAL('clicked()'), self.source_select)
+#        QtCore.QObject.connect(self.ui.current_pos, QtCore.SIGNAL('clicked()'), self.current_pos)
+        QtCore.QObject.connect(self.ui.cb_srcs, QtCore.SIGNAL("clicked(bool)"), self.current_pos)
+        QtCore.QObject.connect(self.ui.cb_cal, QtCore.SIGNAL("clicked(bool)"), self.current_pos)
+        QtCore.QObject.connect(self.ui.cb_km, QtCore.SIGNAL("clicked(bool)"), self.current_pos)
+        QtCore.QObject.connect(self.ui.cb_tel, QtCore.SIGNAL("clicked(bool)"), self.current_pos)
+        QtCore.QObject.connect(self.ui.cb_pl, QtCore.SIGNAL("clicked(bool)"), self.current_pos)
+        QtCore.QObject.connect(self.ui.cb_moon, QtCore.SIGNAL("clicked(bool)"), self.current_pos)
+        QtCore.QObject.connect(self.ui.cb_sun, QtCore.SIGNAL("clicked(bool)"), self.current_pos)
+        QtCore.QObject.connect(self.ui.cb_gp, QtCore.SIGNAL("clicked(bool)"), self.current_pos)
+
+
+        QtCore.QObject.connect(self.ui.load_catalogue, QtCore.SIGNAL('clicked()'), self.load_catalogue)
+
+        #Connect button press event "key N" to fwd time
+        #QtCore.QObject.connect(self.ui.fwd_time, QtCore.SIGNAL('clicked()'), self.fwd_time)
+        QtCore.QObject.connect(self.ui.find_nearest, QtCore.SIGNAL('clicked()'), self.find_nearest_bore)
+
+#        QtCore.QObject.connect(self, QtCore.SIGNAL("calibrators"), self.refresh_plot)
+#        QtCore.QObject.connect(self, QtCore.SIGNAL("6dfsources"), self.refresh_plot)
+#        QtCore.QObject.connect(self, QtCore.SIGNAL("plotNone"), self.refresh_plot)
+
+        QtCore.QObject.connect(self.timer5, QtCore.SIGNAL('timeout()'), self.__timerfunction)
+        QtCore.QObject.connect(self.ui.source_que,QtCore.SIGNAL("itemDoubleClicked (QListWidgetItem *)"),self.observe_source)
+#        QtCore.QObject.connect(self.ui.pushButton, QtCore.SIGNAL('pressed()'),self.point_source_now)
+
+
+    def __call__(self, mouse_event):
+        ax = mouse_event.inaxes
+        if not ax:
+            return
+        line = ax.get_lines()[0]
+        contained, infos = line.contains(mouse_event)
+        if not contained:                                # eventually exited
+            for annotation in self.annotations.values():
+                annotation.set_visible(False)
+        else:
+            xdata, ydata = line.get_data()
+            ind = infos['ind'][0]
+            annotation = self.annotations[xdata[ind], ydata[ind]]
+            if not annotation.get_visible():             # is entered
+                annotation.set_visible(True)
+        ax.figure.canvas.update()
+
+#    def point_source_now(self):
+#        print self.source_name, self.source_pick_az, self.source_pick_alt
+#        source_name = self.source_name
+#        coord_type = 'AZEL'
+#        long_coord = numpy.float64(self.source_pick_alt)
+#        lat_coord = numpy.float64(self.source_pick_az)
+#        print source_name, coord_type, lat_coord, long_coord
+#        self.point_source(source_name, coord_type, lat_coord, long_coord)
+
+    def get_6dfsource_info(self, cat_file):
+        cat = open(cat_file, 'r')
+        source_6df = {}
+        n = 0
+        for line in cat:
+            li=line.strip()
+            if not li.startswith("#"):
+                source_info = line.rstrip().split()
+                src_nm = source_info[0]
+                src_ra_dec = source_info[1]
+                src_dec_dec = source_info[2]
+#                print "RA, DEC decimal:", src_ra_dec, src_dec_dec
+                src_ra = ephem.hours(src_ra_dec)
+                src_dec = ephem.degrees(src_dec_dec)
+                src_flux = 0
+                src_velo = source_info[3]
+                source_6df[src_nm] = ([src_ra, src_dec, src_flux, src_velo])
+                n=n+1
+        return source_6df
+#                #self.canvas8.axes8.plot(self.RA, self.DEC, "o", color="green")
+            #self.canvas8.axes8.plot(self.RA, self.DEC, "o", color="green")
+                #Filter sources
+#            return  self.sources_6df_eq, self.sources_6df_ec
+
+    def plot_definitions(self):
+        #Draw some constant El limit lines
+        low_limit_y_axis_plt = numpy.zeros(360)
+        low_limit_x_axis_plt = numpy.arange(0, (2*numpy.pi), (2*numpy.pi/360))
+        high_limit_y_axis_plt = numpy.zeros(360)
+#        low_limit_y_axis_plt[:] = cdscc.lat
+#        high_limit_y_axis_plt[:] = cdscc.lat + numpy.pi/2
+        low_limit_y_axis_plt[:] = numpy.deg2rad(6)
+        high_limit_y_axis_plt[:] = numpy.deg2rad(80)
+        #self.canvas8 = FigureCanvas.__init__(self, self.fig)
+        #self.axes8 = SubplotHost(self.canvas8.fig, 1, 1, 1, grid_helper=grid_helper)
+        #self.fig.add_subplot(self.axes8)
+        self.canvas8.axes8.set_xlabel('AZ (rad)')
+        self.canvas8.axes8.set_ylabel('EL (rad)')
+#        self.canvas8.axes8.set_ylim((numpy.rad2deg(cdscc.lat)-20), (numpy.rad2deg(cdscc.lat)+110))
+#        self.canvas8.axes8.set_xlim(0,360)
+        self.canvas8.axes8.plot(low_limit_x_axis_plt, low_limit_y_axis_plt, color='red', ls ='--')
+        self.canvas8.axes8.plot(low_limit_x_axis_plt, high_limit_y_axis_plt, color='red', ls ='--')
+        self.canvas8.axes8.set_xlim(0,2*numpy.pi)
+        #-0.5 an arbitrary value
+        self.canvas8.axes8.set_ylim(-0.5,numpy.pi/2)
+        self.canvas8.draw()
+#        self.canvas8.axes8.set_xlim(0,360.)
+#        self.canvas8.axes8.set_ylim(0,90.)
+#        self.canvas8.axes8.grid(b=1, which='major', axis='both')
+#        self.canvas8.axes8.grid(b=1, which='minor', axis='both')
+#
+#        self.canvas8.axes8.set_rmax(180.)
+#self.canvas8.axes8.set_ylim(numpy.deg2rad(-180),numpy.deg2rad(180))
+        #Update to Matplotlib1.2
+#        self.canvas8.axes8.set_theta_zero_location("N")
+
+        #cb = fig.colorbar(image, orientation='horizontal')
+#        canvas = matplotlib.backends.backend_agg.FigureCanvasAgg(fig)
+#        self.axes8 = self.fig.add_subplot(111)
+#        self.axes5.get_xaxis().set_visible(False)
+#        self.axes5.get_yaxis().set_visible(False)
+#        self.axes5.frameon = False
+#        self.axes5.patch.set_visible(False)
+#        self.axes5.axis('off')
+
+    def get_calibrator_info(self):
+        cat_file = '/home/ops/workspace/current_workspace/ok_cals.list'
+        cat = open(cat_file, 'r')
+        source_cal = {}
+        #self.source_name = {}
+        n = 0
+        for line in cat:
+            li=line.strip()
+            if not li.startswith("#"):
+                source_cal_info = line.rstrip().split()
+                try:
+                    cal_src_nm = source_cal_info[0]
+                    cal_src_ra = source_cal_info[1:4]
+                    cal_src_dec = source_cal_info[4:7]
+                    cal_src_K_flux = source_cal_info[-2]
+                    cal_src_ra =  (':'.join(cal_src_ra))
+                    cal_src_dec =  (':'.join(cal_src_dec))
+                    src_velo = 0
+                    source_cal[cal_src_nm] = ([cal_src_ra, cal_src_dec, cal_src_K_flux, src_velo])
+                    n=n+1
+                except:
+#                    #print "some of the sources in calibrators catalogue could not be parsed correctly"
+#                    try:
+#                        print line
+#                    except:
+#                        pass
+                    pass
+        return source_cal
+        #print source_cal
+#                #self.canvas8.axes8.plot(self.RA, self.DEC, "o", color="green")
+
+            #self.canvas8.axes8.plot(self.RA, self.DEC, "o", color="green")
+                #Filter sources
+#            return  self.sources_6df_eq, self.sources_6df_ec
+    def get_masersource_info(self):
+        cat_file = '/home/ops/workspace/current_workspace/sources/maser.txt'
+        cat = open(cat_file, 'r')
+        self.source = {}
+        #self.source_name = {}
+        n = 0
+        for line in cat:
+            li=line.strip()
+            if not li.startswith("#"):
+                source_info = line.rstrip().split()
+#                print source_info[0]
+                src_nm = source_info[0]
+                src_ra = source_info[-9:-6]
+                src_dec = source_info[-6:-3]
+                src_ra = ephem.hours((':'.join(src_ra)))
+                src_dec = ephem.degrees((':'.join(src_dec)))
+                src_flux = 0
+                src_velo = source_info[-3]
+                self.source[src_nm] = ([src_ra, src_dec, src_flux, src_velo])
+                n=n+1
+        return self.source
+#                #self.canvas8.axes8.plot(self.RA, self.DEC, "o", color="green")
+            #self.canvas8.axes8.plot(self.RA, self.DEC, "o", color="green")
+                #Filter sources
+#            return  self.sources_6df_eq, self.sources_6df_ec
+
+#    def get_knownmasers_info(self):
+#        cat_file = './known_masers.list'
+#        cat = open(cat_file, 'r')
+#        self.source = {}
+#        #self.source_name = {}
+#        n = 0
+#        for line in cat:
+#            li=line.strip()
+#            if not li.startswith("#"):
+#                source_info = line.rstrip().split()
+#                src_nm = source_info[0]
+#                src_ra = source_info[1:4]
+#                src_dec = source_info[4:7]
+#                src_ra =  (':'.join(src_ra))
+#                src_dec =  (':'.join(src_dec))
+#                src_flux = 0
+#                src_velo = 0
+#                self.source[src_nm] = ([src_ra, src_dec, src_flux, src_velo])
+#                n=n+1
+#                print [src_ra, src_dec, src_flux, src_velo]
+#        return self.source
+##                #self.canvas8.axes8.plot(self.RA, self.DEC, "o", color="green")
+#
+#            #self.canvas8.axes8.plot(self.RA, self.DEC, "o", color="green")
+#                #Filter sources
+##            return  self.sources_6df_eq, self.sources_6df_ec
+
+    def calculate_planets(self, date):
+        cdscc.date = date
+        planets_dict = {}
+        #calculate sun moon and the planets positions
+        self.sun, self.moon = ephem.Sun(), ephem.Moon()
+        
+        self.sun.compute(cdscc)
+        self.moon.compute(cdscc)
+        self.jupiter.compute(cdscc)
+        self.mars.compute(cdscc)
+        self.venus.compute(cdscc)
+        self.mercury.compute(cdscc)
+        self.saturn.compute(cdscc)
+        self.uranus.compute(cdscc)
+        solar_sys_dict =  {source.name: [source.ra, source.dec, source.az, source.alt]}
+        print solar_sys_dict
+        self.canvas8.axes8.plot(self.sun.az,self.sun.alt, "o", color="yellow", picker=5)
+        self.canvas8.axes8.plot(self.moon.az,self.moon.alt, "o", color="green", picker=5)
+
+    def calculate_sun(self, date):
+        cdscc.date = date
+        sun_dict = {}
+        #calculate sun moon and the planets positions
+        source = ephem.Sun()
+        source.compute(cdscc)            
+        sun_dict =  {source.name: [source.ra, source.dec, source.az, source.alt]}
+        print sun_dict
+        self.canvas8.axes8.plot(source.az, source.alt, "o", color="yellow", picker=5)
+        
+    def calculate_moon(self, date):
+        cdscc.date = date
+        moon_dict = {}
+        #calculate sun moon and the planets positions
+        source = ephem.Moon()
+        source.compute(cdscc)            
+        moon_dict =  {source.name: [source.ra, source.dec, source.az, source.alt]}
+        print moon_dict
+        self.canvas8.axes8.plot(source.az, source.alt, "o", color="green", picker=5)
+        
+    def calculate_telescope_pos(self):
+        #plot the telescope position in Az-El
+        tel_az = numpy.deg2rad(float(self.ui.az_mon.text()))
+        tel_el = numpy.deg2rad(float(self.ui.el_mon.text()))
+        print tel_el, tel_az
+        self.canvas8.axes8.plot(tel_az, tel_el, "o", color="blue")
+
+    def calculate_source_postions(self, source, date):
+        cdscc.date = date
+        source_dict = {}
+        rc('grid', color='#316931', linewidth=1, linestyle='-')
+        rc('xtick', labelsize=10)
+        rc('ytick', labelsize=10)
+        for key, value in source.iteritems():
+            """
+            #you can transform the source coordinates to either Equatorial, Ecliptic or Galactic
+            sources_eq = ephem.Equatorial(source[value][0], source[value][1], epoch=ephem.J2000)
+            sources_ec = ephem.Ecliptic(sources_eq)
+            sources_gal = ephem.Galactic(sources_eq)
+            source_ra = sources_eq.ra
+            source_dec = sources_eq.dec
+            """
+            #Compute the Az-Alt from RA-DEC for CDSCC
+            source = ephem.FixedBody()
+            source._ra = value[0]   #source_ra
+            source._dec = value[1]  #source_dec
+            source._epoch = ephem.J2000
+            source_flux = value[2]
+            source_velo = value[3]
+            source.compute(cdscc)
+            #Create a new 6df dictionary
+            source_dict[key] = ([source.ra, source.dec, source.az, source.alt, source_flux, source_velo])
+            #self.source6df_dict[self.source6df_name] = ([self.source6df.ra, self.source6df.dec, self.source6df.az, self.source6df.alt])
+#        print 'calculated postion', source_dict
+        return source_dict
+            
+    def plot_sources(self, n, source_dict, color, alpha):
+#        print "New plot..."
+        self.line8, = self.canvas8.axes8.plot(0,0)
+        self.line9, = self.canvas8.axes8.plot(0,0)
+        if n == 0:
+            #Plot all sources
+            for key, value in source_dict.items():
+                name = key
+                ra = (value[0])
+                dec = (value[1])
+                az = (value[2])
+                alt = (value[3])
+                flux = (value[4])
+                #TODO- Flux can be chosen for wither L, S, C, X, K, W; default K for TAMS
+                self.line8, = self.canvas8.axes8.plot(az, alt, "o", color=color, picker=5, markersize = float(flux), alpha=1)
+        else:
+            #Plot n sources
+            #Plot all sources
+            for key, value in source_dict.items()[:n]:
+                name = key
+                ra = (value[0])
+                dec = (value[1])
+                az = (value[2])
+                alt = (value[3])
+                #Plot RA-DEC
+                #???
+                #Plot Az-El
+                self.line9, = self.canvas8.axes8.plot(az, alt, "*", color=color, picker=5, markersize = 8, alpha=alpha)
+        self.canvas8.axes8.legend([self.line8, self.line9], ["calibrators", "TAMS sources"], prop={'size':8})
+
+    def refresh_plot(self):
+        self.canvas8.update()
+#        self.canvas8.cla()
+        self.canvas8.draw()
+
+    def load_catalogue(self):
+        cdscc.date = datetime.datetime.utcnow()
+        utc_now_qt = QtCore.QDateTime.currentDateTimeUtc()
+        utc_now_py = utc_now_qt.toPyDateTime()
+        new_cat = str(QtGui.QFileDialog.getOpenFileName(None, 'Select File', './', "*.list"))
+        cat_file = new_cat
+        cat = open(cat_file, 'r')
+        source_cal = {}
+        #self.source_name = {}
+        n = 0
+        for line in cat:
+            li=line.strip()
+            if not li.startswith("#"):
+                source_cal_info = line.rstrip().split()
+                if debug: print source_cal_info
+                cal_src_nm = source_cal_info[0]
+                cal_src_ra = source_cal_info[1]
+                cal_src_dec = source_cal_info[2]
+                cal_src_K_flux = 0
+                cal_src_ra =  (':'.join(cal_src_ra))
+                cal_src_dec =  (':'.join(cal_src_dec))
+                cal_src_velo = 0
+                source_cal[cal_src_nm] = ([cal_src_ra, cal_src_dec, cal_src_K_flux, cal_src_velo])
+                n=n+1
+#            self.canvas8.axes8.cla()
+        self.plot_sources(0, self.calculate_source_postions(source_cal, utc_now_py), 'blue', 1)
+        self.source_dict = dict(self.calculate_source_postions(source_cal, utc_now_py).items())
+#        return source_cal
+
+    def plot_Calcurrent(self, utc_now_py):
+        self.plot_calibrators = True
+#            self.canvas8.axes8.cla()
+        self.emit(QtCore.SIGNAL("calibrators"), self.plot_calibrators)
+        self.plot_sources(0, self.calculate_source_postions(self.get_calibrator_info(), utc_now_py), 'brown', 1)
+        self.source_dict = dict(self.calculate_source_postions(self.get_calibrator_info(), utc_now_py).items())
+
+
+    def plot_6dfcurrent(self, utc_now_py):
+        file1 = '/home/ops/workspace/current_workspace/sources/TargetList_Priority1.txt'
+        file2 = '/home/ops/workspace/current_workspace/sources/PartialObs.txt'
+        file3 = '/home/ops/workspace/current_workspace/sources/DoneObs.txt'
+        file4 = '/home/ops/workspace/current_workspace/sources/TargetList_Priority4.txt'
+        self.plot_6dfsrcs = True
+        self.emit(QtCore.SIGNAL("calibrators"), self.plot_6dfsrcs)
+#            self.canvas8.axes8.cla()
+        self.plot_sources(400, self.calculate_source_postions(self.get_6dfsource_info(file1), utc_now_py), 'green', 1)
+        self.plot_sources(400, self.calculate_source_postions(self.get_6dfsource_info(file2), utc_now_py), 'red', 0.5)
+        self.plot_sources(400, self.calculate_source_postions(self.get_6dfsource_info(file3), utc_now_py), 'black', 0.3)
+        self.plot_sources(400, self.calculate_source_postions(self.get_6dfsource_info(file4), utc_now_py), 'orange', 0.2)
+
+        self.source_dict1 = dict(self.calculate_source_postions(self.get_6dfsource_info(file1), utc_now_py).items())
+        self.source_dict2 = dict(self.calculate_source_postions(self.get_6dfsource_info(file2), utc_now_py).items())
+        self.source_dict3 = dict(self.calculate_source_postions(self.get_6dfsource_info(file3), utc_now_py).items())
+        self.source_dict4 = dict(self.calculate_source_postions(self.get_6dfsource_info(file4), utc_now_py).items())
+        self.source_dict = dict(self.source_dict1.items() + self.source_dict2.items()+self.source_dict3.items() + self.source_dict4.items())
+        
+    def plot_km(self, utc_now_py):
+        self.plot_masers = True
+#            self.canvas8.axes8.cla()
+        self.emit(QtCore.SIGNAL("masers"), self.plot_masers)
+        self.plot_sources(100, self.calculate_source_postions(self.get_masersource_info(), utc_now_py), 'yellow', 1)
+        self.source_dict = dict(self.calculate_source_postions(self.get_masersource_info(), utc_now_py).items())
+            
+    def plot_current(self):
+        cdscc.date = datetime.datetime.utcnow()
+        utc_now_qt = QtCore.QDateTime.currentDateTimeUtc()
+        self.ui.dateTimeEdit.setDateTime(utc_now_qt)
+        utc_now_py = utc_now_qt.toPyDateTime()
+
+        #Data Playback
+        if self.ui.cb_cal.isChecked():
+            self.plot_Calcurrent(utc_now_py)
+        elif self.ui.cb_srcs.isChecked():
+            self.plot_6dfcurrent(utc_now_py)
+        elif self.ui.cb_km.isChecked():
+            self.plot_km(utc_now_py)
+        elif self.ui.cb_tel.isChecked():
+            self.calculate_telescope_pos()
+        elif self.ui.cb_sun.isChecked():
+            self.calculate_sun(utc_now_py)
+        elif self.ui.cb_moon.isChecked():
+            self.calculate_moon(utc_now_py)
+        else:
+            self.canvas8.axes8.cla()
+            self.plot_definitions()
+#            if not self.ui.cb_cal.isChecked():
+#                self.canvas8.axes8.cla()
+#                self.plot_definitions()
+##                self.plot_6dfsrcs = False
+##                self.emit(QtCore.SIGNAL("plotNone"), self.plot_6dfsrcs)
+#            if not self.ui.cb_srcs.isChecked():
+#                self.canvas8.axes8.cla()
+#                self.plot_definitions()
+##                self.plot_6dfsrcs = False
+##                self.emit(QtCore.SIGNAL("plotNone"), self.plot_6dfsrcs)
+#            if not self.ui.cb_km.isChecked():
+#                self.canvas8.axes8.cla()
+#                self.plot_definitions()
+##                self.plot_6dfsrcs = False
+##                self.emit(QtCore.SIGNAL("plotNone"), self.plot_6dfsrcs)
+#            if not self.ui.cb_tel.isChecked():
+#                self.canvas8.axes8.cla()
+#                self.plot_definitions()
+##                self.plot_6dfsrcs = False
+##                self.emit(QtCore.SIGNAL("plotNone"), self.plot_6dfsrcs)
+#            
+##            self.plot_sources(0, self.calculate_source_postions(self.get_calibrator_info(), utc_now_py), 'brown')
+#
+##            self.plot_sources(0, self.calculate_source_postions(self.get_calibrator_info(), utc_now_py), 'brown')
+##            self.plot_sources(10, self.calculate_source_postions(self.get_6dfsource_info(), utc_now_py), 'red')
+##            self.source_dict = dict(self.calculate_source_postions(self.get_calibrator_info(), utc_now_py).items())+dict(self.calculate_source_postions(self.get_6dfsource_info(), utc_now_py).items())
+
+                
+    def run(self):
+        """
+        Sources-
+        Observer, Sun, Moon, Planets,
+        TODO:
+            Plot feed position on sky
+        """
+        self.plot_definitions()
+        self.__timerfunction()
+
+    def __timerfunction(self):
+        """Plots by default are updated every second using the timer function"""
+        cdscc.date = datetime.datetime.utcnow()
+        self.ui.label_LST.setText(str(cdscc.sidereal_time()))
+#        print self.ui.label_LST.text()
+#        print self.ui.lcd_time_4.value()
+        #Compute the Az-Alt from RA-DEC for CDSCC
+        #RA DEC needs to be precessed ???
+        source = ephem.FixedBody()
+#        print self.ui.ra_sf.text()
+        source._ra = ephem.hours(str(self.ui.ra_sf.text()))
+        source._dec = ephem.degrees(str(self.ui.dec_sf.text()))
+        source._epoch = ephem.J2000
+        source.compute(cdscc)
+#        print source.az, source.alt
+        self.ui.az_sf.setText(str(source.az))
+        self.ui.el_sf.setText(str(source.alt))
+
+    def update_gui(self):
+        try:
+            if debug: print 'GUI needs source', self.source_pick_ra, self.source_pick_dec
+        except:
+            pass
+
+    """
+    def on_move(self, event):
+        visibility_changed = False
+        for point, annotation in points_with_annotation:
+            should_be_visible = (point.contains(event)[0] == True)
+
+            if should_be_visible != annotation.get_visible():
+                visibility_changed = True
+                annotation.set_visible(should_be_visible)
+    """
+
+    def onclick(self, event):
+        if debug: print "Click detected"
+        try:
+            if event.button==1:
+#                print('Left click- Source selected')
+                self.ui.sourceInfo.clear()
+                self.ui.sourceInfo.insertPlainText(self.source_name+"\n")
+                self.ui.sourceInfo.insertPlainText("RA: "+str(self.source_info_ra)+"\n")
+                self.ui.sourceInfo.insertPlainText("DEC: "+str(self.source_info_dec)+"\n")
+                self.ui.sourceInfo.insertPlainText("Az: "+str(self.source_info_az)+"\n")
+                self.ui.sourceInfo.insertPlainText("El: "+str(self.source_info_alt)+"\n")
+                self.ui.sourceInfo.insertPlainText("Vsys: "+str(self.source_info_vsys)+"\n")
+
+            elif event.button==3:
+#                print('Right click- Source info presented')
+                self.ui.sourceInfo.clear()
+                self.ui.sourceInfo.insertPlainText(self.source_name_label+"\n")
+                self.ui.sourceInfo.insertPlainText("RA: "+str(self.source_info_ra)+"\n")
+                self.ui.sourceInfo.insertPlainText("DEC: "+str(self.source_info_dec)+"\n")
+                self.ui.sourceInfo.insertPlainText("Az: "+str(self.source_info_az)+"\n")
+                self.ui.sourceInfo.insertPlainText("El: "+str(self.source_info_alt)+"\n")
+                self.ui.sourceInfo.insertPlainText("Vsys: "+str(self.source_info_vsys)+"\n")
+            else:
+                if debug: print "Button not recognised"
+        except:
+            if debug: print "Error occured when getting source info"
+
+    def test(self, event1):
+        if debug: print "Debug1"
+
+    def source_pick(self, event1):
+        #print numpy.float64(repr(self.sun.ra)),numpy.float64(repr(self.sun.dec))
+        """
+        Right click- gets Info of the source
+        Left click- selects source
+        scroll- finds nearest source
+        """
+        #Merge dictinaries for whatever sources ticked in the GUI
+#        print len(self.source_dict)
+#        if isinstance(event.artist, Line2D):
+        thisline = None
+        thisline = event1.artist
+#        thisline.update
+#        if thisline is not None and not hasattr(event1, 'already_picked'):
+        if debug: print (thisline)
+#==============================================================================
+#             if self.RADEC_flg == 1:
+#                 self.source_pick_ra = thisline.get_xdata()[0]
+#                 self.source_pick_dec = thisline.get_ydata()[0]
+#                 for key, value in self.source_dict.iteritems():
+#                     #print numpy.deg2rad(numpy.float64(self.source_pick_ra)), numpy.deg2rad(numpy.float64(self.source_pick_dec))
+#                     #print numpy.float64(repr(ephem.hours(value[0]))), numpy.float64(repr(ephem.hours(value[1])))
+#                     #Took me 1 day to figure this out!!!
+#                     if (numpy.float64(self.source_pick_ra)) == numpy.float64(repr(ephem.hours(value[0]))):
+#                         self.source_name = key
+#                         self.source_info_ra = value[0]
+#                         self.source_info_dec = value[1]
+#                         self.annotation = self.canvas8.axes8.annotate(self.source_name, xy = ((self.source_pick_ra), (self.source_pick_dec)), xytext = (-20, 20), textcoords = 'offset points', ha = 'right', va = 'bottom', bbox = dict(boxstyle = 'round,pad=0.5', fc = 'yellow', alpha = 0.5), arrowprops = dict(arrowstyle = '->', connectionstyle = 'arc3,rad=0'))
+#                     else:
+#                         pass
+#            else:
+#==============================================================================
+        #When Plotting in Az-El
+        self.source_pick_az = thisline.get_xdata()[0]
+        self.source_pick_alt = thisline.get_ydata()[0]
+        n = 0
+        m = 0
+        for key, value in self.source_dict.items():
+            if round(numpy.float64(self.source_pick_az), 6) == round(numpy.float64(repr(ephem.hours(value[2]))), 6):
+                if debug: print "Match found for object", key
+                self.source_name = key
+                self.source_info_ra = value[0]
+                self.source_info_dec = value[1]
+                self.source_info_az = value[2]
+                self.source_info_alt = value[3]
+                self.source_info_vsys = value[5]
+            else:
+#                print "%i %i, can't find a match"%(m,n)
+                pass
+            n = n +1
+        m = m+1
+#            #print self.source_pick_nm
+        self.annotation = self.canvas8.axes8.annotate(self.source_name, xy = ((self.source_pick_az), (self.source_pick_alt)), xytext = (-20, 20), textcoords = 'offset points', ha = 'right', va = 'bottom', bbox = dict(boxstyle = 'round,pad=0.5', fc = 'yellow', alpha = 0.5), arrowprops = dict(arrowstyle = '->', connectionstyle = 'arc3,rad=0'))
+        # by default, disable the annotation visibility
+        self.annotation.set_visible(True)
+        self.canvas8.draw()
+        #print 'source picked:', zip(numpy.take(self.source_pick_ra, ind), numpy.take(self.source_pick_dec, ind))
+        self.annotation.set_visible(False)
+
+    def source_select(self):
+        #If source window contains a text, activate select source option and when pressed select source for observation
+        """
+        self.ui.source_name.setText = str(self.source_name)
+        self.ui.ra_sf.setText = str(self.source_name)
+        self.ui.dec_sf.setText = str(self.source_name)
+        """
+        self.selected_source_list = []
+        try:
+            self.selected_source_list.append(self.source_name)
+            self.ui.source_que.addItems(self.selected_source_list)
+        except:
+            raise RuntimeWarning ("No source selected for observation!!!")
+            pass
+
+    #Scroll refreshes the plot...to be used for peak search function(not implemented)
+    def scroll(self, event):
+        """Record mouse scrolling...to be used for ??? function(not implemented)"""
+        self.refresh = True
+
+        try:
+            #print 'Step=%d, x=%d, y=%d, xdata=%f, ydata=%f'%(
+            #event.step, event.x, event.y, event.xdata, event.ydata)
+            self.refresh_plot()
+        except: pass
+
+    def observe_source(self):
+        from scipy import constants
+        #self.ui.obs_code.setText()
+        selected_item =  self.ui.source_que.currentItem().text()
+        if debug: print 'selected source for observation' %selected_item
+#        if e.key() == QtCore.Qt.Key_Delete:
+#        self.ui.source_que.currentItem().
+        for key, value in self.source_dict.iteritems():
+            if key == selected_item:
+#                print value
+                self.ui.obs_code.setText(str(key))
+                self.ui.source_name_label.setText(str(key))
+                self.ui.ra_sf.setText(str(value[0]))
+                self.ui.dec_sf.setText(str(value[1]))
+                print "Source velocity for %s: %s"%(selected_item, value[5])
+                self.ui.vsys.setText(str(value[5]))
+
+    def current_pos(self):
+        if debug: print "Method: Current Source positions plotted"
+        self.plot_current()
+        self.refresh_plot()
+
+    def fwd_time(self):
+        if debug: print "Method: Sources being forwarded in time"
+        pass
+
+    def find_nearest(self):
+        if debug: print "Method: Find nearest object on the plot; forward on key press N go back with key press B"
+        #Find nearest object to the telescope on the plot
+        #Not implemented
+        pass
+
+        """
+        sub find_nearest {
+          my ($x, $y) = @_;
+          # get current viewport dimensions in normalised device coordinates
+          # This is used to re-normalise the data so that tne nearest point
+          # as viewed on the screen is selected.
+          my $xprop = $xmax - $xmin;
+          my $yprop = $ymax - $ymin;
+          pgqvp(0,$x1, $x2, $y1, $y2);
+          my $ratio = ($x2 - $x1) / ($y2 - $y1);
+
+          my $dist = 9999999.0;
+          my $newdist = $dist;
+          my $nearest = 0;
+          while (($id, $rd) = each %catalogue) {
+            if ($debug) {
+        #      print "Considering  $id $rd->{source}\n";
+        #      print "ra = $rd->{ra},dec = $rd->{dec}\n";
+            }
+            $newdist = sqrt(( (($rd->{az} - $x)/$xprop)*$ratio)**2 +
+                      (($rd->{el} - $y)/$yprop)**2);
+        #    print "$i, $dist, $newdist, $xa[$i], $ya[$i], $x, $y\n";
+            if ($newdist < $dist) {
+              $nearest = $id;
+              $dist = $newdist;
+            }
+          }
+        #  print "nearest = $nearest, $id\n";
+        #  print "RA = $catalogue{$nearest}->{ra}\n";
+        return ($nearest);
+        }
+        """
+
+    def find_nearest_bore(self):
+        if debug: print "Method: Find nearest boresight on the plot; forward on key press C go back with key press V"
+        """
+        get current viewport dimensions in normalised device coordinates.
+        This is used to re-normalise the data so that tne nearest point
+        as viewed on the screen is selected.
+        Method-
+        1. Pick a source.
+        2. Get source coordinates in RA-DEC.
+        3. Define max angular distance of 15 degrees to search the calibrators within.
+        4. Search the calibrators within max angular distance.
+        5. If no candidates found step the angular distance by 15 degrees and search again.
+        6. If unsuitable candidates are found, step the angular distance by 15 degrees on key press N, go back to the previous source on key press B.
+
+        # ra_src, dec_src, ra_cal, dec_cal: Source RA, Source DEC, Calibraotor RA, Calibrator DEC
+
+#        ephem.separation(hpos(ma0), hpos(ma1))
+#        ra_src, dec_src = self.source_pick_ra, self.source_pick_dec
+#        if debug: print "Nearest source to:", self.source_pick_ra, self.source_pick_dec
+#        radius = ra_src_max_dist
+        """
+        import math
+        nearest_bs = []
+        x1 = self.source_pick_az #source RA
+        y1 = self.source_pick_alt #source DEC
+        if debug: print x1, y1
+        angular_incrx = numpy.deg2rad(360./1000.)
+        angular_incry = numpy.deg2rad(90./1000.)
+
+#        if xtol is None:
+#          xtol = ((max(xdata) - min(xdata))/float(len(xdata)))/2
+#        if ytol is None:
+#          ytol = ((max(ydata) - min(ydata))/float(len(ydata)))/2
+        n = 0
+        m = 0
+        xmax = x1
+        ymax = y1 
+        xmin = x1
+        ymin = y1
+        
+        while(True):
+          if debug: print n, xmin, xmax
+          for key, value in self.source_dict.items():
+              if  (xmin < value[2] < xmax) and  (ymin < value[3] < ymax):
+                  x2 = round(numpy.float64(repr(ephem.hours(value[2]))), 6)
+                  y2 = round(numpy.float64(repr(ephem.degrees(value[3]))), 6)
+                  if key == self.source_name:
+                    if debug: print 'Debug1'
+                    continue
+                  else:
+                    if debug: print 'nearest boresight found %s, within %i iterations'%(key, n)
+                    if debug: print len(nearest_bs)
+                    self.annotation = self.canvas8.axes8.annotate(key, xy = ((x2), (y2)), xytext = (-20, 20), textcoords = 'offset points', ha = 'right', va = 'bottom', bbox = dict(boxstyle = 'round,pad=0.5', fc = 'pink', alpha = 0.5), arrowprops = dict(arrowstyle = '->', connectionstyle = 'arc3,rad=0'))
+            #            ind = event.ind
+                    # by default, disable the annotation visibility
+                    self.annotation.set_visible(True)
+                    self.canvas8.draw()
+                    #print 'source picked:', zip(numpy.take(self.source_pick_ra, ind), numpy.take(self.source_pick_dec, ind))
+                    self.annotation.set_visible(False)
+                    return
+              else:
+                pass
+          xmax = xmax + angular_incrx
+          ymax = ymax + angular_incry
+          xmin = xmin - angular_incrx
+          ymin = ymin - angular_incry
+          n = n +1
+                    #if nothing found increment by 1 degree
+    ##            if round(numpy.float64(self.source_pick_az), 6) == round(numpy.float64(repr(ephem.hours(value[2]))), 6):
+    #                if debug: print "Match found for object", key
+    #                self.source_name = key
+    #                self.source_info_ra = value[0]
+    #                self.source_info_dec = value[1]
+    #                self.source_info_az = value[2]
+    #                self.source_info_alt = value[3]
+
+#                print "%i %i, can't find a match"%(m,n)
+#            annotes.append((self.distance(x,clickX,y,clickY),x,y, a) )
+        #Find the nearest source
+#          x2 = 0
+#          y2 = 0
+#          dist = math.hypot(x1 - x2, y1 - y2)
+#
+#        print x1, y1, xmax, ymax, xmin, ymin
+
+
+
+#        ratio = (x2-x1)/(y2-y1)
+#
+#        dist = 9999999.0
+#        newdist = dist
+#        nearest = 0
+#        meanaz
+#        meanel
+#          while (($id, $rd) = each %boresight) {
+#            $meanaz = ($rd->{az1} + $rd->{az2})/2.0;
+#            $meanel = ($rd->{el1} + $rd->{el2})/2.0;
+#
+#            $newdist = sqrt(( (($meanaz - $x)/$xprop)*$ratio)**2 +
+#                      (($meanel - $y)/$yprop)**2);
+#            if ($newdist < $dist) {
+#              $nearest = $id;
+#              $dist = $newdist;
+#            }
+#          }
+#        #  print "nearest = $nearest, $id\n";
+#        #  print "RA = $boresight{$nearest}->{ra}\n";
+#        return nearest
+
+    def offset(self,ax, x, y):
+        return offset_copy(ax.transData, x=x, y=y, units='dots')
+
+    def distance(self, x1, x2, y1, y2):
+        """
+        return the distance between two points
+        """
+        return
+
+#        az,el = azel_calc(obs, ephem.Sun())
+#        ax.plot(az, el, color='#ee8d18', lw=3)
+#        obs.date = datetime.datetime.utcnow()
+#        az,el = azel_calc(obs, ephem.Moon())
+#        ax.plot(az, el, color='#bf7033', lw=3)

@@ -1,0 +1,12 @@
+/*
+!/dist
+!/lib
+!/src
+!/.editorconfig
+!/.gitignore
+!/.npmignore
+!/bower.json
+!/index.js
+!/LICENSE
+!/package.json
+!/README.md

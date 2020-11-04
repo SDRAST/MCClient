@@ -1,0 +1,705 @@
+<template>
+  <div>
+    <status-bar
+        :status="status"
+        :station="station"
+        :sourceForObservation="sourceForObservation">
+    </status-bar>
+    <h6 align=center>DSN Radio Astronomy Monitor and Control</h6>
+    <!-- source management area -->
+    <div class="app-container">
+        <!-- second panel -->
+        <source-monitor
+            class="source-monitor"
+            ref="source-monitor"
+            @time-change="onSourceMonitorTimeChange"
+            @select-source-for-observation="onSelectSourceForObservation"
+            :sources="sources"
+            :sourcesObject="sourcesObject"
+            :styles="sourcePlot.styles"
+            :sourceNames="sourceNames"
+            :width="sourcePlot.width"
+            :height="sourcePlot.height"
+            :render="sourcePlot.render">
+        </source-monitor>
+        <!-- three panels in third section  -->
+        <div class="power-meter-monitor">
+            <power-meter-monitor
+                ref="power-meter-monitor"
+                :socket="socket">
+            </power-meter-monitor>
+        </div>
+        <div class="antenna-monitor">
+            <antenna-monitor
+                ref="antenna-monitor"
+                :socket="socket">
+            </antenna-monitor>
+        </div>
+        <antenna-control
+            class="antenna-control"
+            :socket="socket"
+            :sourceForObservation="sourceForObservation">
+        </antenna-control>
+        <!-- fourth section -->
+        <boresight-calibration
+            class="boresight-calibration"
+            :info="serverInfo.boresight"
+            :socket="socket"
+            :sourceForObservation="sourceForObservation">
+        </boresight-calibration>
+        <!-- fifth section, three panels -->
+        <div class="flux-calibration">
+            <flux-calibration
+                :info="serverInfo.flux_calibration"
+                :socket="socket">
+            </flux-calibration>
+        </div>
+        <div class="spectrometer-calibration">
+            <spectrometer-calibration
+                :socket="socket"
+                :ROACHNames="ROACHNames">
+            </spectrometer-calibration>
+        </div>
+        <div class="nodding">
+            <spectrometer-control>
+            </spectrometer-control>
+            <nodding
+                :socket="socket"
+                :sourceForObservation="sourceForObservation"
+                @nodding="onNodding">
+            </nodding>
+        </div>
+        <!-- <input type="text" v-model="socketPortModel" @keyup.enter="onSocketPortChange(socketPortModel)">
+        <button @click="onSocketPortChange(socketPortModel)">Connect</button> -->
+    </div>
+    <p>
+        version: {{version}}
+    </p>
+    </div>
+</template>
+
+<script>
+import io from "socket.io-client"
+import Vue from "vue"
+import * as log from "loglevel"
+
+import PausableTimer from "./../pausable_timer.js"
+
+import SourceMonitor from "./SourceMonitor.vue"
+import PowerMeterMonitor from "./PowerMeterMonitor.vue"
+import AntennaMonitor from "./AntennaMonitor.vue"
+import AntennaControl from "./AntennaControl.vue"
+import FluxCalibration from "./FluxCalibration.vue"
+import BoresightCalibration from "./BoresightCalibration/BoresightCalibration.vue"
+import SpectrometerCalibration from "./SpectrometerCalibration.vue"
+import SpectrometerControl from "./SpectrometerControl.vue"
+import Nodding from "./Nodding.vue"
+import Panel from "./Panel.vue"
+import StatusBar from "./StatusBar.vue"
+import SocketIOMixin from "./SocketIOMixin.vue"
+//import SuperHead     from "./SuperHead.vue"
+
+var logger = log.getLogger("App")
+logger.debug("App: logger created")
+
+export default {
+    props:{
+        domain: {type: String, default:"localhost"},
+        port: {type:Number, default:5000},
+        version: {type: String, default: ""}
+    },
+    components:{
+        "source-monitor":SourceMonitor,
+        "power-meter-monitor":PowerMeterMonitor,
+        "antenna-monitor": AntennaMonitor,
+        "antenna-control": AntennaControl,
+        "boresight-calibration":BoresightCalibration,
+        "flux-calibration":FluxCalibration,
+        "spectrometer-calibration":SpectrometerCalibration,
+        "spectrometer-control":SpectrometerControl,
+        "nodding":Nodding,
+        "status-bar": StatusBar,
+        "panel":Panel
+    },
+    created(){
+        this.initSocket()
+        //self.getSources()
+    }, // end 'created'
+    mounted(){
+      logger.debug("App.mounted invoked")
+      bus.$on("antenna-monitor:monitor-data", this.setAntennaMonitorData)
+      bus.$on("status:change", this.setStatus)
+      //bus.$on("projectChanged", this.changeProject)
+      //bus.$on("activityChanged", this.changeActivity)
+      //bus.$on("superHeadRendered", this.setSuperHeadDefaults)
+      //bus.$emit('projectChanged', this.currentProject)
+    },
+    methods:{
+      serverCommand: SocketIOMixin.methods.serverCommand,
+      getPort: SocketIOMixin.methods.getPort,
+      checkIfRegistered: SocketIOMixin.methods.checkIfRegistered,
+      registerPort: function(socketOrPort){
+          var port = this.getPort(socketOrPort)
+          this.socketPort = port
+          this.registeredPorts[port] = true
+      },
+      onSelectSourceForObservation(source){
+            logger.debug(`selectSourceForObservation: ${source.name}`)
+            this.sourceForObservation = source
+      },
+      formatSourceForObservation: function(sourceObject){
+            if (sourceObject === null){
+                return
+            }
+            var name = sourceObject.name
+            var category = sourceObject.category
+            return `<span style="color:${this.sourcePlot.styles[category].fill};">${sourceObject.name}</span>`
+      },
+      getTime: function(){
+        // currently not used
+        // gets the local host's time
+        var changeTime = ()=>{
+          this.clientTime = new Date().toISOString()
+          this.getServerTime()
+          //logger.debug(`App.getTime.changeTime: at ${this.clientTime}`)
+        }
+        // this gets executed only the first time that 'getTime' is called
+        this.timer = new PausableTimer(changeTime, this.interval)
+        this.timer.start()
+        logger.debug(`App.getTime: starting timer at ${this.clientTime}`)
+      },
+      initSocket: function(){
+        logger.debug(`App.initSocket: called with socket = ${this.socket}`)
+        if (this.socket === null || ! this.checkIfRegistered(this.socket)){
+            logger.debug("App.initSocket: creating socket")
+            this.socket = io.connect(`http://${this.socketDomain}:${this.socket}`)
+            this.registerPort(this.socket)
+            this.registerSocketHandlers()
+            logger.debug("App.initSocket: registered")
+        }
+        this.socket.on("connect", ()=>{
+            logger.debug(`App.initSocket: connected to ${this.socketPort}`)
+            this.socket.emit("hostname")
+            bus.$emit(
+                "status:change",
+                `client connected on port ${this.socketPort}`
+            )
+        })
+      },
+      registerSocketHandlers(){
+        logger.debug(`App.registerSocketHandlers called`)
+        this.socket.on("server_time",              this.serverTimeHandler)
+        this.socket.on("hostname",                 this.hostNameHandler)
+        this.socket.on("set_info_handler",         this.setInfoHandler)
+        this.socket.on("get_info_handler",         this.getInfoHandler)
+        this.socket.on("load_sources_handler",     this.loadSourcesHandler)
+        //this.socket.on("get_sources_handler",      this.getSourcesHandler)
+        this.socket.on("roachnames_handler",       this.roachNameHandler)
+        this.socket.on("get_equipment_handler",    this.equipmentHandler)
+        this.socket.on("projects_handler",         this.projectsHandler)
+        this.socket.on("activities_handler",       this.activitiesHandler)
+        // this.socket.on("get_activity_handler",     this.getActivityHandler) no longer used
+        this.socket.on("get_project_handler",      this.getProjectHandler)
+        this.socket.on("get_sources_data_handler", this.getSourcesDataHandler)
+        this.socket.on("got_styles",               this.processStyles)
+        this.socket.on("got_ordered_styles",       this.setStyleOrder)
+      },
+      hostNameHandler(data){
+        var hostName = data
+        logger.debug(`App.hostNameHandler: hostName: ${hostName}`)
+        bus.$emit("status:change", `remote host name is ${hostName}`)
+        var sourceDir = this.hostNameConfig[hostName]+this.currentProject
+        this.serverCommand(
+            "set_info", [["project","source_dir"],sourceDir], {}, "set_info_handler")
+        this.serverCommand(
+            "get_info", [], {}, "get_info_handler")
+        //this.serverCommand(
+        //    "load_sources",[],{},"load_sources_handler")
+        //this.serverCommand(
+        //    "get_source_names", [this.currentActivity], {}, "load_sources_handler")
+        this.serverCommand(
+            "get_sources_data", [this.currentActivity], {}, "get_sources_data_handler")
+        this.serverCommand(
+            "get_equipment", [], {}, "get_equipment_handler")
+        this.serverCommand(
+            "hdwr", ["Backend", "roachnames"], {}, "roachnames_handler")
+        this.serverCommand(
+            "get_projects", [], {}, "projects_handler")
+        this.serverCommand(
+            "get_activities", [], {}, "activities_handler")
+        this.server = hostName
+      },
+      getSources(time){
+        // issues the 'get_sources_data' server command to update
+        // time-dependent parameters
+        logger.debug(`App.getSources: called for ${time}`)
+        this.serverCommand("init_info", [], {activity: this.currentActivity})
+        this.serverCommand(
+            "get_sources_data",
+            [this.currentActivity],
+            {
+                source_names:this.sourceNames,
+                when:time,
+                formatter:"%Y-%m-%dT%H:%M:%S.%fZ"
+            },
+            "get_sources_data_handler"
+        )
+      },
+      setInfoHandler(data){
+        logger.debug("App.setInfoHandler: called")
+      },
+      getInfoHandler(data){
+        logger.debug(`App.getInfoHandler: called`)
+        var info = data.args[0]
+        this.serverInfo = info
+      },
+      loadSourcesHandler(data){
+        // new version which handles the server response from "get_source_names"
+        // and re-initializes sourcePlot.styles
+        logger.debug("App.loadSourcesHandler: called")
+        this.sourceNames = data.args[0]
+        // re-initialize sourcePlot.styles
+        this.sourcePlot.styles = {}
+        // once sources are loaded we need to update the data periodically
+        // define the timer action
+        var changeTime = ()=>{
+          logger.debug(`App.loadSourcesHandler.changeTime: source time is ${this.sourceMonitorTime}`)
+          if (this.sourceMonitorTime === null){
+              logger.debug("App.loadSourcesHandler.changeTime called")
+              var time = new Date().toISOString()
+              this.getSources(time)
+          }
+        }
+        // this sets up the timer
+        this.timer = new PausableTimer(changeTime, this.sourceUpdateInterval)
+        this.timer.start()
+        logger.debug(`App.loadSourcesHandler: timer started for ${this.sourceUpdateInterval} s`)
+      },
+      equipmentHandler(data){
+        // processes the response to the 'get_equipment' server command
+        logger.debug("App.equipmentHandler: called")
+        var equipment = data.args[0]
+        logger.debug(`App.equipmentHandler: returned ${equipment}`)
+        this.antenna = equipment["Antenna"]
+        this.frontend = equipment["FrontEnd"]
+        this.receiver = equipment["Receiver"]
+        this.if_switch = equipment["IF_switch"]
+        this.backend = equipment["Backend"]
+      },
+      projectsHandler(data){
+        // processes the response to the 'get_projects' server command
+        logger.debug("App.projectsHandler: called")
+        var projects = data.args[0]
+        this.projects = projects
+        logger.debug(`App.projectsHandler: returned ${this.projects}`)
+      },
+      activitiesHandler(data){
+        // processes the response to the 'get_activities' server command
+        logger.debug("App.activitiesHandler: called")
+        var activities = data.args[0]
+        this.activities = activities
+        logger.debug(`App.activitiesHandler: returned ${this.activities}`)
+      },
+      getSourcesNamesHandler(data){
+        // not used
+        // added to simplify 'loadSourcesHandler()'; let server do it
+        logger.debug("App.getSourcesNamesHandler: called")
+      },
+      getSourcesHandler(data){
+        // processes the response to 'get_sources' server command
+        // this is now obsolete and the socket event has been
+        // disabled
+        logger.debug("App.getSourcesHandler: called")
+        // put data in 'sourcesObject''
+        var sources = data.args[0]
+        this.sourcesObject = sources
+        // generate a list
+        this.sources = this.sourcesObjectToSourceList(sources)
+        // this implements a sleep for testing purposes
+        // var wait = ms => new Promise((r, j)=>setTimeout(r, ms))
+        // var prom = wait(10000)
+        // var showdone = ()=>logger.debug('App.getSourcesHandler: done')
+        // prom.then(showdone)
+      },
+      roachNameHandler(data){
+        // processes response from the '"hdwr", ["Backend", "roachnames"]' command
+        logger.debug(`App.roachNameHandler: called`)
+        var ROACHNames = data.args[0]
+        this.ROACHNames = ROACHNames
+      },
+      getSourcesDataHandler(data){
+        // processes response from the '"get_souces_data", [activity]' command
+        // which returns a structure that looks like:
+        // {sourcename: {}, sourcename: {}, ...}
+        // where the inner dicts have all the source attributes
+        var sources = data.args[0]
+        this.sourcesObject = sources
+        this.sourceNames = Object.keys(sources)
+        // temporary dignostic output
+        var source1name = this.sourceNames[0]
+        var source1 = this.sourcesObject[source1name]
+        logger.debug(`getSourcesDataHandler: first source is ${source1name}`)
+        var source1keys = Object.keys(source1)
+        logger.debug(`getSourcesDataHandler: first source keys are ${source1keys}`)
+        var source1info = source1['info']
+        var source1infoKeys = Object.keys(source1info)
+        logger.debug(`getSourcesDataHandler: first source info keys are ${source1infoKeys}`)
+        var key = source1info['key']
+        var cat = source1info['category']
+        var lbl = source1info['label']
+        logger.debug(`getSourcesDataHandler: key=${key}`)
+        logger.debug(`getSourcesDataHandler: cat=${cat}`)
+        logger.debug(`getSourcesDataHandler: lbl=${lbl}`)
+        logger.debug(`getSourcesDataHandler: fill=${source1info['fill']}`)
+        // create sources list
+        this.sources = this.sourcesObjectToSourceList(sources)
+        // set up styles the first time
+        // if (this.sourcePlot.styles == {}){
+        if (Object.keys(this.sourcePlot.styles).length === 0 && this.sourcePlot.styles.constructor === Object){
+          logger.debug(`getSourcesDataHandler: getting styles`)
+          this.serverCommand("get_styles",[],{},"got_styles")
+        }
+        // here get the symbol radius forthis source
+      },
+      processStyles(data){
+        // this processes the response from the server "get_styles" command
+        // get the styles for the plot symbols
+        // this is the whole styles object: sourcePlot.styles
+        var styles = data.args[0]
+        logger.debug(`processStyles: got ${styles}`)
+        var styles_keys = Object.keys(styles)
+        logger.debug(`processStyles: category keys: ${styles_keys}`)
+        styles_keys.forEach((key)=>{
+          // this is the style for one category: sourcePlot.styles[category]
+          logger.debug(`processStyles: processing category key ${key}`)
+          var styleObject = styles[key]
+          this.sourcePlot.styles[key] = styleObject
+          logger.debug(`processStyles: ${key}=${styleObject}`)
+          var style_keys = Object.keys(styleObject)
+          logger.debug(`processStyles: style keys: ${style_keys}`)
+          style_keys.forEach((skey)=>{
+            // this is one item from the style for one category:
+            // sourcePlot.styles[category][item]
+            logger.debug(`processStyles: processing category ${key} style ${skey}`)
+            var sval = styleObject[skey]
+            logger.debug(`processStyles: ${skey}=${sval}`)
+            this.sourcePlot.styles[key][skey] = sval
+          })
+        })
+        logger.debug(`processStyles: done; get style order`)
+        this.serverCommand("get_ordered",[],{},"got_ordered_styles")
+      },
+      setStyleOrder(data){
+        // this processes the response from the "get_ordered" server command
+        // get the style order for the category checklist
+        var ordered = data.args[0]
+        logger.debug(`setStyleOrder: to ${ordered}`)
+        this.sourcePlot.styles['__order__'] = ordered
+        this.sources = this.sourcesObjectToSourceList(this.sourcesObject)
+      },
+      sourcesObjectToSourceList:function(sourcesObject){
+        // convert a sources object to a list of source objects
+        var categoryLookup = (category)=>{
+            // compute the source category from the 'category' item
+            var mapping = {
+                "known maser": "known-masers",
+                "catalog":"catalog-sources",
+                "antenna":"antenna",
+                "calibrator": "calibrators",
+                "priority 1":"priority-1",
+                "priority 2":"priority-2",
+                "priority 3":"priority-3",
+                "priority 4":"priority-4",
+            }
+            var categoryStr = []
+            // force 'categoryStr' to be a list
+            if (! Array.isArray(category)){
+                category = [category]
+            }
+            // concatenate category and sub-category
+            category.forEach((subCategory)=>{
+                categoryStr.push(mapping[subCategory])
+            })
+            return categoryStr.join("-")
+        }
+        var convert = 180. / Math.PI
+        var data = []
+        Object.keys(sourcesObject).forEach((srcName)=>{
+                var src = sourcesObject[srcName]
+                src.name = srcName
+                if (src.name !== "Antenna"){
+                    src.az = src.az * convert
+                    src.el = src.el * convert
+                }
+                src.category = categoryLookup(src.info.category)
+                data.push(src)
+            })
+            return data
+      },
+      onSocketPortChange(newPort){
+            this.socketPortModel = parseInt(newPort)
+            this.socketPort = this.socketPortModel
+            this.initSocket()
+      },
+      onSourceMonitorTimeChange(newTime){
+            this.sourceMonitorTime = newTime
+      },
+      onNodding(flag){
+            if (flag){
+                this.$refs["power-meter-monitor"].pauseTimers()
+                this.$refs["antenna-monitor"].pauseTimers()
+            }else{
+                this.$refs["power-meter-monitor"].unPauseTimers()
+                this.$refs["antenna-monitor"].unPauseTimers()
+            }
+            // this is now calculated by the server
+            //src.category = categoryLookup(src.info.category)
+            //src.category = src.info.category
+      },
+      setAntennaMonitorData(antennaMonitorData){
+          logger.debug(`setAntennaMonitorData: ${JSON.stringify(antennaMonitorData)}`)
+          var circleData = {
+              "az":parseFloat(antennaMonitorData["AzimuthAngle"], 10),
+              "el":parseFloat(antennaMonitorData["ElevationAngle"], 10),
+              "ra":0.0,
+              "dec":0.0,
+              "info":{
+                "name":"Antenna",
+                "category":["antenna"]
+              },
+              "category":"antenna"
+          }
+          Vue.set(this.sourcesObject, "Antenna", circleData)
+          // take array sources and for each source (obj) return its name
+          var names = this.sources.map((obj)=>{obj.name})
+          var idxAntenna = names.indexOf("Antenna")
+          this.sources.splice(idxAntenna, 1)
+          this.sources.push(circleData)
+      },
+      setStatus: function(newStatus){
+          // logger.debug(`App.setStatus for ${newStatus}`)
+          this.status = newStatus
+      },
+      getServerTime: function(){
+          // gets the server host's time
+          this.serverCommand("server_time",[],{},"server_time_handler")
+      },
+      serverTimeHandler(data){
+          // logger.debug(`App.serverTimeHandler: server sent ${data}`)
+          // console.log(data)
+          var serverTime = data.result
+          // logger.debug("App.serverTimeHandler: serverTime is %s", serverTime)
+          if (data.status === "success"){
+            this.serverTime = serverTime
+          } else {
+            logger.error("serverTimeHandler got status=%s", data.status)
+          }
+      },
+      changeProject(project){
+          // changes the 'currentProject' and sends 'get_default_activity' server cmd
+          this.currentProject = project
+          logger.debug(`App.changeProject: ${this.currentProject}`)
+          this.serverCommand("get_project_activities",[this.currentProject],{},
+                             "activities_handler")
+          // Dean things this will cause the dropdown to be re-rendered
+          //this.serverCommand("get_activities",[],{},"activities_handler")
+      },
+      getActivityHandler(data){
+          // processes response from 'get_default_activity' server command
+          // this is no longer used
+          var activity = data.args[0]
+          logger.debug(`App.getActivityHandler: activity is ${activity}`)
+          this.currentActivity = activity
+          logger.debug(`App.getActivityHandler: current activity is now ${this.currentActivity}`)
+          // when the activity is changed thsetSuperHeadDefaultsen the sources arrays must be emptied
+          this.serverCommand("init_info", [], {activity: this.currentActivity})
+          this.serverCommand("get_sources_data", [this.currentActivity], {},
+                             "get_sources_data_handler")
+      },
+      changeActivity(activity){
+          // changes the 'currentActivity' and sends the 'get_activitys_project' srvr cmd
+          this.currentActivity = activity
+          logger.debug(`App.changeActivity: ${this.currentActivity}`)
+          this.serverCommand("get_activitys_project",[this.currentActivity],{},"get_project_handler")
+      },
+      getProjectHandler(data){
+          // processes response from 'get_activitys_project' server command
+          var project = data.args[0]
+          this.currentProject = project
+      },
+      setSuperHeadDefaults(data){
+          // put default values
+          logger.debug(`App.setSuperHeadDefaults: entered`)
+          var projects = this.projects
+          var activities = this.activities
+          var project = this.currentProject
+          var activity = this.currentActivity
+          this.currentProject = project
+          this.currentActivity = activity
+          this.projects = projects
+          this.activities = activities
+      }
+    }, // end 'methods'
+    watch: {
+        port: function(){
+          // logger.debug("App: socket port changed")
+          this.socketPort = this.port
+          this.initSocket()
+        },
+        domain: function(){
+          logger.debug("App: domain changed")
+          this.socketDomain = this.domain
+          this.initSocket()
+        },
+        sourceMonitorTime: function(){
+          // source monitor time may be other than real time in order to plan
+          // do this is the user changes the source monitor time
+          logger.debug("App: sourceMonitorTime changed")
+          var date = this.sourceMonitorTime
+          if (this.sourceMonitorTime === null){
+              date = new Date()
+          }
+          //this.getSources(date.toISOString())
+        },
+        sourceForObservation(){
+          logger.debug("App: source for observation changed")
+          this.sourceForObservation.formatted = this.formatSourceForObservation(
+                                                    this.sourceForObservation)
+        }
+    }, // end 'watch'
+    data: function(){
+        var port = this.port
+        logger.debug("App.data: starting")
+        logger.debug(`App.data: port=${this.port}`)
+        logger.debug(`App.data: domain=${this.domain}`)
+        logger.debug(`App.data: sourceUpdateInterval=${this.sourceUpdateInterval}`)
+        return {
+          station: 43,
+          status: "client started",
+          socket: 5000,
+          socketPort: port,
+          socketPortModel: port,
+          socketDomain: this.domain,
+          registeredPorts: {port: false},
+          // the computer time on the client host
+          clientTime: "pending",
+          // the computer time on the server host
+          serverTime: "pending",
+          // the time used by the session planning page
+          sourceMonitorTime: null,
+          // how often to update sourceMonitorTime
+          sourceUpdateInterval: 4*60*1000,
+          sources: [],
+          sourcesObject: {},
+          sourceNames: [],
+          sourcePlot:{
+            styles: {
+                //"calibrators":{
+                    //class:"scatter calibrators",
+                    //fill:"#B10DC9",
+                    //opacity:0.8,
+                    // this should now be overridden by a value from the server
+                    //r:(d)=>{
+                    //    var flux = parseFloat(d.info.flux.K)
+                    //    if (flux === undefined || isNaN(flux)){
+                    //        flux = 0.0
+                    //    }
+                    //    flux += 3.0
+                    //    return flux
+                    //},
+                    //display:"Calibrators"
+                //},
+            }, // end 'sourcePlot.styles'
+            width: 300,
+            height: 300,
+            render: 0
+          }, // end 'sourcePlot'
+          currentProject: "TAMS",
+          projects: [],
+          currentActivity: "TMS0",
+          activities: [],
+          configuration: "",
+          sourceForObservation:null,
+          serverInfo:{
+                boresight:{},
+                flux_calibration:{},
+          },
+          hostNameConfig:{
+                "dean-ThinkPad-T460": "/home/dean/jpl-dsn/projects_TAMS",
+                "enceladus": "/home/dean/work/tams/project_TAMS",
+                "crux1": "/home/ops/projects/TAMS",
+                "crux": "/home/ops/projects/TAMS",
+                "kuiper": "/usr/local/projects/TAMS"
+          },
+          ROACHNames: [],
+          sourceMonitorTime: null
+        } // end 'return'
+    } // end 'data'
+} // end 'export default'
+</script>
+
+<style scoped>
+/* Grid Styling */
+.app-container {
+    display: grid;
+    grid-template-rows: 0.5fr repeat(calc(var(--rows)-1), minmax(0.5fr, 1fr));
+    grid-template-columns: repeat(var(--columns), 1fr);
+    grid-gap: 0.5rem 0.5rem;
+}
+
+.source-monitor {
+    grid-column: 1 / calc(1 + var(--columns));
+    grid-row: 1 / 1;
+}
+
+/* .source-for-observation{
+    grid-column: 1 / calc(1 + var(--columns));
+    grid-row: 2 / 2;
+} */
+
+.power-meter-monitor{
+    grid-column: 1 / 3;
+    grid-row: 2 / 2;
+}
+
+.antenna-monitor{
+    grid-column: 3 / 4;
+    grid-row: 2 / 2;
+}
+
+.antenna-control{
+    grid-column: 4 / calc(1 + var(--columns));
+    grid-row: 2 / 2;
+}
+
+.boresight-calibration{
+    grid-column: 1 / calc(1 + var(--columns));
+    grid-row: 3 / 3;
+}
+
+.flux-calibration{
+    grid-column: 1 / 2;
+    grid-row: 4 / 4;
+}
+
+.spectrometer-calibration{
+    grid-column: 2 / calc(var(--columns));
+    grid-row: 4 / 4;
+}
+
+.nodding {
+    grid-column: 4 / 5;
+    grid-row: 4 / 4;
+}
+</style>
+
+<style>
+.scrollable-parent {
+    overflow: hidden;
+}
+
+.scrollable-child {
+    max-height: 350px;
+    overflow-y: scroll;
+}
+</style>
