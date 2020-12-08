@@ -37,7 +37,7 @@ class TitledSpinbox(QtWidgets.QFrame):
   Spinbox with Title
   """
   def __init__(self, parent, name, 
-               title = "spinbox", minval = 0, maxval = 100):
+               title = "spinbox", minval = 0, maxval = 100, real=False):
     """
     Args:
       parent - the object which it is part of
@@ -47,7 +47,7 @@ class TitledSpinbox(QtWidgets.QFrame):
       maxval - maximum allowed integer
     """
     QtWidgets.QFrame.__init__(self)
-    stdSizePolicyMinimum(self)
+    stdSizePolicyPreferred(self)
     tspLayout = QtWidgets.QVBoxLayout(self)
     self.setObjectName(_fromUtf8(name))
     self.title = QtWidgets.QLabel(self)
@@ -59,7 +59,10 @@ class TitledSpinbox(QtWidgets.QFrame):
     self.title.setText(QtWidgets.QApplication.translate(
                                                       parent.name, title, None))
     tspLayout.addWidget(self.title)
-    self.value = QtWidgets.QSpinBox(self)
+    if real:
+      self.value = QtWidgets.QDoubleSpinBox(self)
+    else:
+      self.value = QtWidgets.QSpinBox(self)
     font = QtGui.QFont()
     font.setPointSize(8)
     self.value.setFont(font)
@@ -148,20 +151,68 @@ class MultiHChecks(QtWidgets.QFrame):
         self.buttonGroup.addButton(self.button[index])
         hChecksLayout.addWidget(self.button[index])
 
+class TitledTextDisplay(QtWidgets.QFrame):
+  """
+  """
+  def __init__(self, parent, name, title="title", value=False):
+    QtWidgets.QFrame.__init__(self)
+    stdSizePolicyPreferred(self)
+    indLayout = QtWidgets.QVBoxLayout(self)
+    self.label = QtWidgets.QLabel(self)
+    self.label.setEnabled(True)
+    font = QtGui.QFont()
+    font.setPointSize(8)
+    self.label.setFont(font)
+    self.label.setObjectName(_fromUtf8(name+"Label"))
+    self.label.setText(QtWidgets.QApplication.translate(
+                                          parent.name, title, None))
+    indLayout.addWidget(self.label)
+    #       scan value (1,2)
+    self.value = QtWidgets.QLabel(self)
+    self.value.setEnabled(True)
+    font = QtGui.QFont()
+    font.setPointSize(8)
+    self.value.setFont(font)
+    self.value.setObjectName(_fromUtf8(name+"Value"))
+    self.value.setText(QtWidgets.QApplication.translate(
+                                          parent.name, "0", None))
+    indLayout.addWidget(self.value)
+
+
 class ObsParsFrame(QtWidgets.QFrame):
    """
    observing paramaters
    """
    def __init__(self, parent):
      """
+     This is the grid layout
+          0       1             2      3
+         ------  --------   -------  --------
+      0 |      | | scans  | | Scan || Record |
+        |  m   | |        | |      ||        |
+      1 |  o   | |        | |   0  ||        |
+        |  d   |  --------   ------  --------
+      2 |  e   | |        | |  Signal beam   |
+        |  s   | | cycles |  ----------------
+      3 |      | |        | | beam chk btn   |
+         ------   --------   ----------------
+      4 |spec/ | | recs/  | | integration    |
+        | scan | |   scan | |    time        |
+         ------  |        | |                |
+      5 |switch| |        | |                |
+        | state| |        | |                |
+         ------   --------   ----------------
      """
      QtWidgets.QFrame.__init__(self)
      stdSizePolicyMinimum(self)
+     self.setFrameShape(QtWidgets.QFrame.StyledPanel)
+     self.setFrameShadow(QtWidgets.QFrame.Raised)
      self.name = "obsParsFrame"
      self.parent = parent
      self.setObjectName(_fromUtf8(self.name))
      obsParsGrid = QtWidgets.QGridLayout(self)
-     # check column (each item two rows deep)
+     
+     # modes column (at 0,0 four rows deep)
      self.mode_select = MultiVChecks(self, "mode_select", number=4,
                                      enabled=[True, True, True, True],
                                      checkable=[True, True, True, True],
@@ -172,43 +223,21 @@ class ObsParsFrame(QtWidgets.QFrame):
                                               "Beam and position switching\n"
                                               "(chopping and nodding)"])
      obsParsGrid.addWidget(self.mode_select,         0, 0, 4, 1)
-     """
-     self.nod_select = MultiVChecks(self, "nod_select", number=2,
-                                    enabled=[True, True],
-                                    checkable=[True, True],
-                                    label=["PSSW", "BPSW"],
-                                    tooltip=["Position switching (nodding)",
-                                             "Beam and position switching\n"
-                                             "(chopping and nodding)"])
-     obsParsGrid.addWidget(self.nod_select,         2, 0, 2, 1)
-     """
-     # scans and cycles column (each item two rows deep)
-     scan_total = TitledSpinbox(self, "num scans", "Scans", 1, 100)
-     obsParsGrid.addWidget(scan_total,          0, 1, 2, 1)
      
-     cycles_total = TitledSpinbox(self, "num cycles", "Cycles", 1, 50)
-     obsParsGrid.addWidget(cycles_total,        2, 1, 2, 1)
-     # info column
-     scansDoneLabel = QtWidgets.QLabel(self)
-     scansDoneLabel.setEnabled(True)
-     font = QtGui.QFont()
-     font.setPointSize(8)
-     scansDoneLabel.setFont(font)
-     scansDoneLabel.setObjectName(_fromUtf8("scansDoneLabel"))
-     scansDoneLabel.setText(QtWidgets.QApplication.translate(
-                                          parent.name, "Scans done", None))
-     obsParsGrid.addWidget(scansDoneLabel, 0, 2, 1, 1)
+     # scan and cycle column (at 0,1 and 2,1 each two rows deep)
+     self.numScans = TitledSpinbox(self, "num scans", "Scans", 1, 100)
+     obsParsGrid.addWidget(self.numScans,     0, 1, 2, 1)
      
-     scansDoneValue = QtWidgets.QLabel(self)
-     scansDoneValue.setEnabled(True)
-     font = QtGui.QFont()
-     font.setPointSize(8)
-     scansDoneValue.setFont(font)
-     scansDoneValue.setObjectName(_fromUtf8("timePerScanLabel"))
-     scansDoneValue.setText(QtWidgets.QApplication.translate(
-                                          parent.name, "0", None))
-     obsParsGrid.addWidget(scansDoneValue, 1, 2, 1, 1)
+     self.num_cycles = TitledSpinbox(self, "num cycles", "Cycles", 1, 50)
+     obsParsGrid.addWidget(self.num_cycles, 2, 1, 2, 1)
      
+     # info columns (at 0,2  1,2  2,2  3,2 each 1x1)
+     self.scan = TitledTextDisplay(  self, "scan",   "Scan",   0)
+     obsParsGrid.addWidget(self.scan,         0, 2, 2, 1)
+     self.record = TitledTextDisplay(self, "record", "Record", 0)
+     obsParsGrid.addWidget(self.record,       0, 3, 2, 1)
+     
+     #        signal beam label (2,2)
      sigBeamLabel = QtWidgets.QLabel(self)
      sigBeamLabel.setEnabled(True)
      font = QtGui.QFont()
@@ -217,12 +246,43 @@ class ObsParsFrame(QtWidgets.QFrame):
      sigBeamLabel.setObjectName(_fromUtf8("sigBeamLabel"))
      sigBeamLabel.setText(QtWidgets.QApplication.translate(
                                           parent.name, "Signal Beam", None))
-     obsParsGrid.addWidget(sigBeamLabel, 2, 2, 1, 1)
-
-     sigBeamInd = MultiHChecks(self, "sig_beam", number=2,
-               enabled=[True, True],
-               checkable=[False, False],
-               label=["1", "2"],
-               tooltip=["source in left beam", "source in right beam"])
-     obsParsGrid.addWidget(sigBeamInd, 3, 2, 1, 1)
+     obsParsGrid.addWidget(sigBeamLabel, 2, 2, 1, 2)
+     #         signal beam indicator (3,2)
+     self.sigBeamInd = MultiHChecks(self, "sig_beam", number=2,
+                                    enabled=[False,False],
+                                    checkable=[True, True],
+                                    label=["1", "2"],
+                        tooltip=["source in left beam", "source in right beam"])
+     obsParsGrid.addWidget(self.sigBeamInd, 3, 2, 1, 2)
+     #         cross switch label (4,0)
+     crossedLabel = QtWidgets.QLabel(self)
+     font = QtGui.QFont()
+     font.setPointSize(8)
+     crossedLabel.setFont(font)
+     crossedLabel.setObjectName(_fromUtf8("minutesLabel"))
+     crossedLabel.setText(QtWidgets.QApplication.translate(
+                                          "Observatory", "Beams Xed", None))
+     obsParsGrid.addWidget(crossedLabel, 4, 0, 1, 1)
+     #         spectra per scan (4,1 two rows deep)
+     self.recsPerScan = TitledSpinbox(self, "recsPerScan", title="recs/scan",
+                                      minval=1, maxval=100)
+     self.recsPerScan.value.setValue(4)
+     obsParsGrid.addWidget(self.recsPerScan, 4, 1, 2, 1)
+     #         integr time (4,2 two rows deep)
+     self.secsPerRec = TitledSpinbox(self, "secPerRec", title="secs/record",
+                                     minval=1, maxval=60, real=True)
+     self.secsPerRec.value.setValue(5.0)
+     obsParsGrid.addWidget(self.secsPerRec, 4, 2, 2, 2)
+     #         cross switch state (5,0)
+     self.crossed = QtWidgets.QCheckBox(self)
+     self.crossed.setToolTip("Beam switch state")
+     self.crossed.setEnabled(False)
+     font = QtGui.QFont()
+     font.setPointSize(8)
+     self.crossed.setFont(font)
+     self.crossed.setCheckable(True)
+     self.crossed.setObjectName(_fromUtf8("crossed"))
+     obsParsGrid.addWidget(self.crossed, 5, 0, 1, 1)
+     
+     
 

@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
+import ephem
+import logging
 
 from matplotlib.backends.backend_qt5agg import (
         FigureCanvas, 
         NavigationToolbar2QT as NavigationToolbar)
 from matplotlib.figure import Figure
+
 import numpy
 from PyQt5 import QtCore, QtGui, QtWidgets
 
@@ -14,15 +17,274 @@ from offsetPalette import offsetPalette
 from tabPalette    import tabPalette
 from bsPalette     import bsPalette
 from bs2Palette    import bs2Palette
+from miscPalette import pmLabelPalette, palette70K, palette12K
+from miscPalette import load2Palette, load1Palette
 
-from obs_pars import ObsParsFrame
+from obs_pars import ObsParsFrame, MultiHChecks
+
+logger = logging.getLogger(__name__)
+rad2deg= 180/numpy.pi
 
 try:
     _fromUtf8 = QtCore.QString.fromUtf8
 except AttributeError:
     _fromUtf8 = lambda s: s
 
+def makeSkyMapAxes(parent, fig, polar=False, title="title", azticks=None,
+                     top="N", fontsize=8):
+  """
+  return class for Cartesian or polar Axes for horizon coordinate system
+  
+  Args:
+    fig (Figure): to which the axes belong
+    polar (bool): True for a polar plot
+    title (str):  plot title
+    azticks(int): separation before azimuth ticks (default 45 deg)
+  """
+  if polar:
+    from matplotlib.projections.polar import PolarAxes
+    class SkyMapAxes(PolarAxes):
+      """
+      Azimuth is the polar angle.
+      Elevation is the co-radius 90 at pol, 0 at circumference.
+      """
+      def __init__(self, parent, fig, polar=False, title="title", azticks=None,
+                     top="N", fontsize=8):
+        self.logger = logging.getLogger(logger.name+".SkyMapAxes")
+        self.parent = parent
+        self.polar = True
+        PolarAxes.__init__(self, fig, [0.05, 0.05, 0.95, 0.95])
+        self.format_axes(title=title, azticks=azticks,
+                         top=top, fontsize=fontsize)
+        fig.add_axes(self)
+        self.logger.debug("__init__: initialized for polar projection")
+      
+      def format_axes(self, title="title", azticks=None,
+                     top="N", fontsize=8):
+        """
+        """
+        self.grid(color='grey', linestyle='--', linewidth=0.5)
+        self.set_title(title, fontsize=fontsize)
+        self.set_theta_zero_location(top)
+        self.invert_yaxis()
+        self.set_theta_direction(-1)
+        if azticks:
+          self.set_thetagrids(numpy.arange(0, 360, azticks))
+        self.set_ylim(90,0)        
+        
+      def plot(self, az, el, marker='.', markersize=None, color=None, alpha=None,
+               linestyle=None, ls=None, picker=None):
+        """
+        converts azimuth in degrees to radians
+        """
+        if type(az) == list:
+          az = numpy.array(az)
+        az = az*numpy.pi/180
+        if ls:
+          linestyle=ls
+        lines = super(SkyMapAxes, self).plot(az, el,
+                                     marker=marker, markersize=markersize,
+                                     linestyle=linestyle, color=color,
+                                     alpha=alpha, picker=picker)
+        return lines
+        
+      def picker(self, *args):
+        """
+        """
+        self.logger.debug("picker: called with: %s", args)
+        event = args[0]
+        thisline = event.artist
+        self.logger.debug("picker: this line: %s", thisline)
+        self.source_pick_az = thisline.get_xdata()[0]*rad2deg
+        self.source_pick_alt = thisline.get_ydata()[0]
+        self.logger.debug("picker: az/el = %s/%s", 
+                          self.source_pick_az, self.source_pick_alt)
+        for key, value in list(self.parent.parent.skymap.source_dict.items()):
+          azimuth = value[2]*rad2deg
+          self.logger.debug("picker: matching az %s for %s with az=%s",
+                            self.source_pick_az, key, azimuth)
+          if round(numpy.float64(self.source_pick_az), 6) == \
+             round(numpy.float64(repr(azimuth)), 6): 
+            self.logger.debug("picker: match found for object %s", key)
+            self.source_name = key
+            self.parent.parent.skymap.source_info_ra = value[0]
+            self.parent.parent.skymap.source_info_dec = value[1]
+            self.parent.parent.skymap.source_info_az = value[2]
+            self.parent.parent.skymap.source_info_alt = value[3]
+            self.parent.parent.skymap.source_info_flux = value[4]
+            self.parent.parent.skymap.source_info_vsys = value[5]
+          else:
+            pass
+        #self.annotation = self.parent.skymap_axes.annotate(
+        self.annotation = self.annotate(
+                           self.source_name,
+                           xy = ((self.source_pick_az), (self.source_pick_alt)),
+                           xytext = (-20, 20), textcoords = 'offset points',
+                           ha = 'right', va = 'bottom',
+                           bbox = dict(boxstyle = 'round,pad=0.5',
+                           fc = 'yellow', alpha = 0.5),
+                           arrowprops = dict(arrowstyle = '->',
+                           connectionstyle = 'arc3,rad=0'))
+        # by default, disable the annotation visibility
+        self.annotation.set_visible(True)
+        self.parent.skymap_canvas.draw()
+        self.annotation.set_visible(False)
+    return SkyMapAxes(parent, fig, polar=polar, title=title, azticks=azticks,
+                      top=top, fontsize=fontsize)
+  else: # not polar
+    from matplotlib.axes import Axes
+    class SkyMapAxes(Axes):
+      """
+      Azimuth is the X-axis.
+      Elevation is the Y-axis.
+      """
+      def __init__(self, parent, fig, polar=False, title="title", azticks=None,
+                     top="N", fontsize=8):
+        self.logger = logging.getLogger(logger.name+".SkyMapAxes")
+        self.parent = parent
+        self.polar = False
+        Axes.__init__(self, fig, [0.05, 0.05, 0.95, 0.95])
+        self.format_axes(title=title, azticks=azticks,
+                         top=top, fontsize=fontsize)
+        fig.add_axes(self)
+        self.logger.debug("__init__: initialized for rectangular projection")
+
+      def format_axes(self, title="title", azticks=None,
+                     top="N", fontsize=8):
+        """
+        """
+        self.set_xlim(0, 360)
+        self.set_ylim(0, 90)
+        self.grid(True)
+        
+      def plot(self, az, el, marker='.', markersize=None, color=None, alpha=None,
+               linestyle=None, ls=None, picker=None):
+        """
+        plot source(s) in degree units
+        """
+        if ls:
+          linestyle=ls
+        lines = super(SkyMapAxes, self).plot(az, el,
+                                     marker=marker, markersize=markersize,
+                                     linestyle=linestyle, color=color,
+                                     alpha=alpha, picker=picker)
+        return lines
+        
+      def picker(self, *args):
+        """
+        """
+        self.logger.debug("picker: called with: %s", args)
+        event = args[0]
+        thisline = event.artist
+        self.logger.debug("picker: this line: %s", thisline)
+        self.source_pick_az = thisline.get_xdata()[0]
+        self.source_pick_alt = thisline.get_ydata()[0]
+        self.logger.debug("picker: az/el = %s/%s", 
+                      self.source_pick_az, self.source_pick_alt)
+        for key, value in list(self.parent.parent.skymap.source_dict.items()):
+          self.logger.debug("source_pick: matching az %s",
+                            self.source_pick_az)
+          azimuth = ephem.hours(value[2])*rad2deg
+          self.logger.debug("source_pick: ... az %s", repr(azimuth))
+          if round(numpy.float64(self.source_pick_az), 6) == \
+             round(numpy.float64(repr(azimuth)), 6): 
+            self.logger.debug("source_pick: match found for object %s", key)
+            self.source_name = key
+            self.parent.parent.skymap.source_info_ra = value[0]
+            self.parent.parent.skymap.source_info_dec = value[1]
+            self.parent.parent.skymap.source_info_az = value[2]
+            self.parent.parent.skymap.source_info_alt = value[3]
+            self.parent.parent.skymap.source_info_flux = value[4]
+            self.parent.parent.skymap.source_info_vsys = value[5]
+          else:
+            pass
+        #self.annotation = self.parent.skymap_axes.annotate(
+        self.annotation = self.annotate(
+                           self.source_name,
+                           xy = ((self.source_pick_az), (self.source_pick_alt)),
+                           xytext = (-20, 20), textcoords = 'offset points',
+                           ha = 'right', va = 'bottom',
+                           bbox = dict(boxstyle = 'round,pad=0.5',
+                           fc = 'yellow', alpha = 0.5),
+                           arrowprops = dict(arrowstyle = '->',
+                           connectionstyle = 'arc3,rad=0'))
+        # by default, disable the annotation visibility
+        self.annotation.set_visible(True)
+        self.parent.skymap_canvas.draw()
+        self.annotation.set_visible(False)
+    return SkyMapAxes(parent, fig, polar=polar, title=title, azticks=azticks,
+                      top=top, fontsize=fontsize)
+
+class AboutDialog(QtWidgets.QDialog):
+    """
+    """
+    def __init__(self, *args, **kwargs):
+        """
+        """
+        super(AboutDialog, self).__init__(*args, **kwargs)
+
+        self.setWindowTitle("About M&C GUI")
+        self.layout = QtWidgets.QVBoxLayout()
+        
+        proglabel = QtWidgets.QLabel()
+        proglabel.setText("Observatory Monitor and Control")
+        font = QtGui.QFont()
+        font.setFamily(_fromUtf8("PT Sans"))
+        font.setPointSize(18)
+        font.setBold(True)
+        font.setWeight(75)
+        proglabel.setFont(font)
+        proglabel.setAlignment(QtCore.Qt.AlignCenter)
+        self.layout.addWidget(proglabel)
+        
+        # logos
+        dsnralogo = QtGui.QPixmap("./DSNra.png").scaledToHeight(194)
+        dsnralabel = QtWidgets.QLabel()
+        dsnralabel.setPixmap(dsnralogo)
+        dsnralabel.setAlignment(QtCore.Qt.AlignCenter)
+        self.layout.addWidget(dsnralabel)
+        
+        logosLayout = QtWidgets.QHBoxLayout()
+        
+        citlogo = QtGui.QPixmap("./caltech.png").scaledToHeight(194)
+        citlabel = QtWidgets.QLabel()
+        citlabel.setPixmap(citlogo)
+        logosLayout.addWidget(citlabel)
+        
+        nyuadlogo = QtGui.QPixmap("./nyu-ad.png").scaledToHeight(194)
+        nyuadlabel = QtWidgets.QLabel()
+        nyuadlabel.setPixmap(nyuadlogo)
+        logosLayout.addWidget(nyuadlabel)
+        
+        saologo = QtGui.QPixmap("./HSCfA.jpg")
+        saolabel = QtWidgets.QLabel()
+        saolabel.setPixmap(saologo)
+        logosLayout.addWidget(saolabel)
+        
+        self.layout.addLayout(logosLayout)
+        
+        # buttons to close dialog
+        buttons = QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+        self.buttonBox = QtWidgets.QDialogButtonBox(buttons)
+        self.buttonBox.accepted.connect(self.accept)
+        self.buttonBox.rejected.connect(self.reject)
+        
+        self.layout.addWidget(self.buttonBox)
+        self.setLayout(self.layout)
+    
 class Ui_Observatory(object):
+    """
+    Notes
+    =====
+    
+    """
+    def show_about(self):
+        about = AboutDialog()
+        if about.exec_():
+            print("Success!")
+        else:
+            print("Cancel!")     
+               
     def stdSizePolicyMinimum(self, widget):
         sizePolicy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Minimum,
                                            QtWidgets.QSizePolicy.Minimum)
@@ -70,378 +332,42 @@ class Ui_Observatory(object):
         sizePolicy.setVerticalStretch(0)
         sizePolicy.setHeightForWidth(widget.sizePolicy().hasHeightForWidth())
         widget.setSizePolicy(sizePolicy)
-        
-    def pmLabelPalette(self):
-        palette = QtGui.QPalette()
-        brush = QtGui.QBrush(QtGui.QColor(255, 255, 255))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.Base, brush)
-        brush = QtGui.QBrush(QtGui.QColor(255, 255, 255))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.Window, brush)
-        brush = QtGui.QBrush(QtGui.QColor(255, 255, 255))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Inactive, QtGui.QPalette.Base, brush)
-        brush = QtGui.QBrush(QtGui.QColor(255, 255, 255))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Inactive, QtGui.QPalette.Window, brush)
-        brush = QtGui.QBrush(QtGui.QColor(255, 255, 255))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Disabled, QtGui.QPalette.Base, brush)
-        brush = QtGui.QBrush(QtGui.QColor(255, 255, 255))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Disabled, QtGui.QPalette.Window, brush)
-        return palette
-    
-    def palette70K(self):
-        palette = QtGui.QPalette()
-        brush = QtGui.QBrush(QtGui.QColor(255, 255, 255))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.Base, brush)
-        brush = QtGui.QBrush(QtGui.QColor(0, 0, 0))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.Window, brush)
-        brush = QtGui.QBrush(QtGui.QColor(255, 255, 255))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Inactive, QtGui.QPalette.Base, brush)
-        brush = QtGui.QBrush(QtGui.QColor(0, 0, 0))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Inactive, QtGui.QPalette.Window, brush)
-        brush = QtGui.QBrush(QtGui.QColor(0, 0, 0))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Disabled, QtGui.QPalette.Base, brush)
-        brush = QtGui.QBrush(QtGui.QColor(0, 0, 0))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Disabled, QtGui.QPalette.Window, brush)
-        return palette
-    
-    def palette12K(self):
-        palette = QtGui.QPalette()
-        brush = QtGui.QBrush(QtGui.QColor(255, 255, 255))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.Base, brush)
-        brush = QtGui.QBrush(QtGui.QColor(0, 0, 0))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.Window, brush)
-        brush = QtGui.QBrush(QtGui.QColor(255, 255, 255))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Inactive, QtGui.QPalette.Base, brush)
-        brush = QtGui.QBrush(QtGui.QColor(0, 0, 0))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Inactive, QtGui.QPalette.Window, brush)
-        brush = QtGui.QBrush(QtGui.QColor(0, 0, 0))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Disabled, QtGui.QPalette.Base, brush)
-        brush = QtGui.QBrush(QtGui.QColor(0, 0, 0))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Disabled, QtGui.QPalette.Window, brush)
-        return palette
-    
-    def load1Palette(self):
-        palette = QtGui.QPalette()
-        brush = QtGui.QBrush(QtGui.QColor(20, 19, 18))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.WindowText, brush)
-        brush = QtGui.QBrush(QtGui.QColor(255, 255, 255))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.Light, brush)
-        brush = QtGui.QBrush(QtGui.QColor(88, 88, 88))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.Dark, brush)
-        brush = QtGui.QBrush(QtGui.QColor(20, 19, 18))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.Text, brush)
-        brush = QtGui.QBrush(QtGui.QColor(20, 19, 18))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.ButtonText, brush)
-        brush = QtGui.QBrush(QtGui.QColor(197, 197, 197))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.Base, brush)
-        brush = QtGui.QBrush(QtGui.QColor(0, 0, 0))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.Window, brush)
-        brush = QtGui.QBrush(QtGui.QColor(20, 19, 18))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Inactive, QtGui.QPalette.WindowText, brush)
-        brush = QtGui.QBrush(QtGui.QColor(255, 255, 255))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Inactive, QtGui.QPalette.Light, brush)
-        brush = QtGui.QBrush(QtGui.QColor(88, 88, 88))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Inactive, QtGui.QPalette.Dark, brush)
-        brush = QtGui.QBrush(QtGui.QColor(20, 19, 18))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Inactive, QtGui.QPalette.Text, brush)
-        brush = QtGui.QBrush(QtGui.QColor(20, 19, 18))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Inactive, QtGui.QPalette.ButtonText, brush)
-        brush = QtGui.QBrush(QtGui.QColor(197, 197, 197))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Inactive, QtGui.QPalette.Base, brush)
-        brush = QtGui.QBrush(QtGui.QColor(0, 0, 0))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Inactive, QtGui.QPalette.Window, brush)
-        brush = QtGui.QBrush(QtGui.QColor(88, 88, 88))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Disabled, QtGui.QPalette.WindowText, brush)
-        brush = QtGui.QBrush(QtGui.QColor(255, 255, 255))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Disabled, QtGui.QPalette.Light, brush)
-        brush = QtGui.QBrush(QtGui.QColor(88, 88, 88))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Disabled, QtGui.QPalette.Dark, brush)
-        brush = QtGui.QBrush(QtGui.QColor(88, 88, 88))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Disabled, QtGui.QPalette.Text, brush)
-        brush = QtGui.QBrush(QtGui.QColor(88, 88, 88))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Disabled, QtGui.QPalette.ButtonText, brush)
-        brush = QtGui.QBrush(QtGui.QColor(0, 0, 0))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Disabled, QtGui.QPalette.Base, brush)
-        brush = QtGui.QBrush(QtGui.QColor(0, 0, 0))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Disabled, QtGui.QPalette.Window, brush)
-        return palette
-    
-    def load2Palette(self):
-        palette = QtGui.QPalette()
-        brush = QtGui.QBrush(QtGui.QColor(0, 0, 0))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.Base, brush)
-        brush = QtGui.QBrush(QtGui.QColor(0, 0, 0))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.Window, brush)
-        brush = QtGui.QBrush(QtGui.QColor(0, 0, 0))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Inactive, QtGui.QPalette.Base, brush)
-        brush = QtGui.QBrush(QtGui.QColor(0, 0, 0))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Inactive, QtGui.QPalette.Window, brush)
-        brush = QtGui.QBrush(QtGui.QColor(0, 0, 0))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Disabled, QtGui.QPalette.Base, brush)
-        brush = QtGui.QBrush(QtGui.QColor(0, 0, 0))
-        brush.setStyle(QtCore.Qt.SolidPattern)
-        palette.setBrush(QtGui.QPalette.Disabled, QtGui.QPalette.Window, brush)
-        return palette
 
-    def observing_parameters_block(self, Observatory):
-        
-        # start: observing parameters block
-        self.obsParsGLayout = QtWidgets.QGridLayout(self.frame_11)
-        self.obsParsGLayout.setObjectName(_fromUtf8("obsParsGLayout"))
-        
-        # start: cycles and time/scan layout
-        
-        self.cyclesTimePerScanGridLayout = QtWidgets.QGridLayout()
-        self.cyclesTimePerScanGridLayout.setObjectName(_fromUtf8("cyclesTimePerScanGridLayout"))
-        #    label row
-        self.cyclesLabel = QtWidgets.QLabel(self.frame_11)
-        self.cyclesLabel.setEnabled(True)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.cyclesLabel.setFont(font)
-        self.cyclesLabel.setObjectName(_fromUtf8("cyclesLabel"))
-        self.cyclesLabel.setText(QtWidgets.QApplication.translate(
-                                                 "Observatory", "cycles", None))
-        self.cyclesTimePerScanGridLayout.addWidget(self.cyclesLabel, 0, 0, 1, 1)
-        
-        self.timePerScanLabel = QtWidgets.QLabel(self.frame_11)
-        self.timePerScanLabel.setEnabled(True)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.timePerScanLabel.setFont(font)
-        self.timePerScanLabel.setObjectName(_fromUtf8("timePerScanLabel"))
-        self.timePerScanLabel.setText(QtWidgets.QApplication.translate(
-                                          "Observatory", "time/scan(s):", None))
-        self.cyclesTimePerScanGridLayout.addWidget(self.timePerScanLabel, 0, 1, 1, 1)
-        # spinbox row
-        self.cycles = QtWidgets.QSpinBox(self.frame_11)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.cycles.setFont(font)
-        self.cycles.setMinimum(1)
-        self.cycles.setMaximum(99)
-        self.cycles.setObjectName(_fromUtf8("cycles"))
-        #self.cycles.valueChanged.connect() <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-        self.cyclesTimePerScanGridLayout.addWidget(self.cycles, 1, 0, 1, 1)
-        
-        self.tperscan = QtWidgets.QSpinBox(self.frame_11)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.tperscan.setFont(font)
-        self.tperscan.setMinimum(10)
-        self.tperscan.setMaximum(99999)
-        self.tperscan.setObjectName(_fromUtf8("tperscan"))
-        self.cyclesTimePerScanGridLayout.addWidget(self.tperscan, 1, 1, 1, 1)
-        # end: cycles and time/scan layout
-        self.obsParsGLayout.addLayout(self.cyclesTimePerScanGridLayout, 0, 0, 1, 1)
-        
-        # start: scans and timer labels
-        self.scansTimerVLayout = QtWidgets.QVBoxLayout()
-        self.scansTimerVLayout.setObjectName(_fromUtf8("scansTimerVLayout"))
-        
-        self.scansLabel = QtWidgets.QLabel(self.frame_11)
-        self.stdSizePolicyMinimum(self.scansLabel)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.scansLabel.setFont(font)
-        self.scansLabel.setObjectName(_fromUtf8("scansLabel"))
-        self.scansLabel.setText(QtWidgets.QApplication.translate(
-                                                 "Observatory", "scans:", None))
-        self.scansTimerVLayout.addWidget(self.scansLabel)
-        
-        self.timerLabel = QtWidgets.QLabel(self.frame_11)
-        self.stdSizePolicyMinimum(self.timerLabel)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.timerLabel.setFont(font)
-        self.timerLabel.setObjectName(_fromUtf8("timerLabel"))
-        self.timerLabel.setText(QtWidgets.QApplication.translate(
-                                                 "Observatory", "timer:", None))
-        self.scansTimerVLayout.addWidget(self.timerLabel)
-        # end: scans and timer labels
-        self.obsParsGLayout.addLayout(self.scansTimerVLayout, 0, 1, 1, 1)
-        
-        # start: scans and timer values column
-        self.scansTimerValueVLayout = QtWidgets.QVBoxLayout()
-        self.scansTimerValueVLayout.setObjectName(_fromUtf8("scansTimerValueVLayout"))
-        
-        self.lcd_cycles = QtWidgets.QLabel(self.frame_11)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.lcd_cycles.setFont(font)
-        self.lcd_cycles.setObjectName(_fromUtf8("lcd_cycles"))
-        self.lcd_cycles.setText(QtWidgets.QApplication.translate(
-                                                     "Observatory", "-1", None))
-        self.scansTimerValueVLayout.addWidget(self.lcd_cycles)
-        
-        self.obs_time = QtWidgets.QLabel(self.frame_11)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.obs_time.setFont(font)
-        self.obs_time.setObjectName(_fromUtf8("obs_time"))
-        self.obs_time.setText(QtWidgets.QApplication.translate(
-                                                      "Observatory", "0", None))
-        self.scansTimerValueVLayout.addWidget(self.obs_time)
-        # end: scans and time values column
-        self.obsParsGLayout.addLayout(self.scansTimerValueVLayout, 0, 2, 1, 1)
-        
-        # start: total time row
-        self.totalTHLayout = QtWidgets.QHBoxLayout()
-        self.totalTHLayout.setObjectName(_fromUtf8("totalTHLayout"))
-        
-        self.totalTLabel = QtWidgets.QLabel(self.frame_11)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.totalTLabel.setFont(font)
-        self.totalTLabel.setObjectName(_fromUtf8("totalTLabel"))
-        self.totalTLabel.setText(QtWidgets.QApplication.translate(
-                                                 "Observatory", "Ttotal", None))
-        self.totalTHLayout.addWidget(self.totalTLabel)
-        
-        self.pos_interval = QtWidgets.QDoubleSpinBox(self.frame_11)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.pos_interval.setFont(font)
-        self.pos_interval.setMinimum(1.0)
-        self.pos_interval.setMaximum(120.0)
-        self.pos_interval.setObjectName(_fromUtf8("pos_interval"))
-        self.totalTHLayout.addWidget(self.pos_interval)
-        
-        self.minutesLabel = QtWidgets.QLabel(self.frame_11)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.minutesLabel.setFont(font)
-        self.minutesLabel.setObjectName(_fromUtf8("minutesLabel"))
-        self.minutesLabel.setText(QtWidgets.QApplication.translate(
-                                                    "Observatory", "min", None))
-        self.totalTHLayout.addWidget(self.minutesLabel)
-        # end: total time row
-        self.obsParsGLayout.addLayout(self.totalTHLayout, 1, 0, 1, 3)
-                
-        # start: observing modes column
-        self.obsModeVLayout = QtWidgets.QVBoxLayout()
-        self.obsModeVLayout.setObjectName(_fromUtf8("obsModeVLayout"))
-        
-        self.nod_bg = QtWidgets.QButtonGroup(Observatory)
-        self.nod_bg.setObjectName(_fromUtf8("nod_bg"))
-        
-        self.sr_nodding = QtWidgets.QCheckBox(self.frame_11)
-        self.sr_nodding.setToolTip("Beam switching or 'chopping'")
-        self.sr_nodding.setEnabled(False)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.sr_nodding.setFont(font)
-        self.sr_nodding.setCheckable(True)
-        self.sr_nodding.setObjectName(_fromUtf8("sr_nodding"))
-        self.sr_nodding.setText(QtWidgets.QApplication.translate(
-                                              "Observatory", "Feed Xing", None))
-        self.nod_bg.addButton(self.sr_nodding)
-        self.obsModeVLayout.addWidget(self.sr_nodding)
-        
-        self.pos_switch = QtWidgets.QCheckBox(self.frame_11)
-        self.pos_switch.setToolTip("Position switching or 'nodding'")
-        self.pos_switch.setEnabled(True)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.pos_switch.setFont(font)
-        self.pos_switch.setCheckable(True)
-        self.pos_switch.setChecked(True)
-        self.pos_switch.setObjectName(_fromUtf8("pos_switch"))
-        self.pos_switch.setText(QtWidgets.QApplication.translate(
-                                            "Observatory", "Antenna Nod", None))
-        self.obsModeVLayout.addWidget(self.pos_switch)
-        
-        self.horizontalLayout_4 = QtWidgets.QHBoxLayout()
-        self.horizontalLayout_4.setObjectName(_fromUtf8("horizontalLayout_4"))
-        
-        self.onsourceFeedLabel = QtWidgets.QLabel(self.frame_11)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.onsourceFeedLabel.setFont(font)
-        self.onsourceFeedLabel.setObjectName(_fromUtf8("onsourceFeedLabel"))
-        self.onsourceFeedLabel.setText(QtWidgets.QApplication.translate(
-                                          "Observatory", "Onsource Feed", None))
-        self.horizontalLayout_4.addWidget(self.onsourceFeedLabel)
-        
-        self.obsModeVLayout.addLayout(self.horizontalLayout_4)
-        
-        self.beam_switch = QtWidgets.QCheckBox(self.frame_11)
-        self.beam_switch.setEnabled(False)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.beam_switch.setFont(font)
-        self.beam_switch.setCheckable(True)
-        self.beam_switch.setObjectName(_fromUtf8("beam_switch"))
-        self.beam_switch.setText(QtWidgets.QApplication.translate(
-                                            "Observatory", "Beam switch", None))
-        self.obsModeVLayout.addWidget(self.beam_switch)
-        # end: observing modes column
-        self.obsParsGLayout.addLayout(self.obsModeVLayout, 2, 0, 1, 3)
-        # end: observing parameters block
+    def HTMLformat(self, text):
+         return """<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.0//EN\"
+                                \"http://www.w3.org/TR/REC-html40/strict.dtd\">
+            <html>
+              <body style=\" font-family:\'PT Sans\'; font-size:8pt;
+                             font-weight:400; font-style:normal;\">
+                <p style=\" margin-top:0px; margin-bottom:0px; margin-left:0px;
+                            margin-right:0px; -qt-block-indent:0;
+                            text-indent:0px;\">
+                  <span style=\" font-family:\'Sans\';\">""" +\
+                    text +\
+               """</span>
+                </p>
+              </body>
+            </html>"""            
     
-           
-    def setupUi(self, Observatory):
+    def setupUi(self, Observatory, polar_sky=False):
         """
         initialize the GUI
         """
         self.name = Observatory.name
+        self.parent = Observatory
         # configure the main window
         Observatory.setObjectName(_fromUtf8("Observatory"))
         Observatory.setEnabled(True)
-        Observatory.resize(1260, 733)
+        Observatory.resize(1260, 800)
         self.stdSizePolicyExpanding(Observatory)
         Observatory.setMinimumSize(QtCore.QSize(0, 0))
-        Observatory.setMaximumSize(QtCore.QSize(1305, 733))
+        Observatory.setMaximumSize(QtCore.QSize(1260, 900))
         stdPalette(Observatory)        
         Observatory.setMouseTracking(False)
         Observatory.setFocusPolicy(QtCore.Qt.NoFocus)
         icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap(_fromUtf8(
-        "../../../../../../../../../../../../../../../../../../../../../galaxy_png.png")),
-         QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        icon.addPixmap(QtGui.QPixmap(_fromUtf8("galaxy.png")),
+                       QtGui.QIcon.Normal, QtGui.QIcon.Off)
         Observatory.setWindowIcon(icon)
         Observatory.setAutoFillBackground(True)
         Observatory.setAnimated(False)
@@ -467,7 +393,7 @@ class Ui_Observatory(object):
         self.Ctrl_Tabs.setEnabled(True)
         self.stdSizePolicyMinimum(self.Ctrl_Tabs)
         self.Ctrl_Tabs.setMinimumSize(QtCore.QSize(1100, 500))
-        self.Ctrl_Tabs.setMaximumSize(QtCore.QSize(1240, 663))
+        self.Ctrl_Tabs.setMaximumSize(QtCore.QSize(1240, 700))
         font = QtGui.QFont()
         font.setFamily(_fromUtf8("PT Sans"))
         font.setPointSize(11)
@@ -477,18 +403,6 @@ class Ui_Observatory(object):
         font.setWeight(50)
         font.setStrikeOut(False)
         font.setKerning(False)
-        self.Ctrl_Tabs.setFont(font)
-        self.Ctrl_Tabs.setMouseTracking(False)
-        self.Ctrl_Tabs.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.Ctrl_Tabs.setContextMenuPolicy(QtCore.Qt.NoContextMenu)
-        self.Ctrl_Tabs.setAcceptDrops(False)
-        self.Ctrl_Tabs.setAutoFillBackground(False)
-        self.Ctrl_Tabs.setTabPosition(QtWidgets.QTabWidget.North)
-        self.Ctrl_Tabs.setTabShape(QtWidgets.QTabWidget.Triangular)
-        self.Ctrl_Tabs.setElideMode(QtCore.Qt.ElideNone)
-        self.Ctrl_Tabs.setTabsClosable(False)
-        self.Ctrl_Tabs.setMovable(True)
-        self.Ctrl_Tabs.setObjectName(_fromUtf8("Ctrl_Tabs"))
         
         # info bar across window bottom
         self.gridLayout = QtWidgets.QGridLayout(self.centralwidget)
@@ -509,9 +423,13 @@ class Ui_Observatory(object):
         font = QtGui.QFont()
         font.setPointSize(8)
         self.status.setFont(font)
+        palette = self.status.palette()
+        brush = QtGui.QBrush(QtGui.QColor(255, 120, 0))
+        palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.WindowText, brush)
+        self.status.setPalette(palette)
         self.status.setObjectName(_fromUtf8("status"))
         self.status.setText(QtWidgets.QApplication.translate("Observatory",
-           "Status: ,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,",
+           "Status: welcome to the Telescope Monitor and Control interface",
            None))
         self.gridLayout.addWidget(self.status, 2, 0, 1, 1)
         Observatory.setCentralWidget(self.centralwidget)
@@ -605,6 +523,7 @@ class Ui_Observatory(object):
         self.lcd_time_3.setNumDigits(10)
         self.lcd_time_3.setSegmentStyle(QtWidgets.QLCDNumber.Flat)
         self.lcd_time_3.setObjectName(_fromUtf8("lcd_time_3"))
+        
         self.label_time_3.setText(QtWidgets.QApplication.translate("Observatory",
          """<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.0//EN\"
                                   \"http://www.w3.org/TR/REC-html40/strict.dtd\">
@@ -650,8 +569,6 @@ class Ui_Observatory(object):
         self.lcd_LST.setNumDigits(10)
         self.lcd_LST.setSegmentStyle(QtWidgets.QLCDNumber.Flat)
         self.lcd_LST.setObjectName(_fromUtf8("lcd_LST"))
-        #self.lcd_LST.setText(QtWidgets.QApplication.translate(
-        #                                  "Observatory", Observatory.LST, None))
         timeStatusLayout.addWidget(self.lcd_LST)
         
         self.label_doy = QtWidgets.QLabel(self.centralwidget)
@@ -698,6 +615,7 @@ class Ui_Observatory(object):
         timeStatusLayout.addWidget(self.lcd_year)
         
         # page for Observations tab ############################################
+        
         self.ObsSummary = QtWidgets.QWidget()
         self.ObsSummary.setObjectName(_fromUtf8("ObsSummary"))
         
@@ -707,24 +625,30 @@ class Ui_Observatory(object):
         self.gridLayout_28 = QtWidgets.QGridLayout()
         self.gridLayout_28.setObjectName(_fromUtf8("gridLayout_28"))
         
-        self.frame_5 = QtWidgets.QFrame(self.ObsSummary)
-        self.stdSizePolicyExpanding(self.frame_5)
-        self.frame_5.setMinimumSize(QtCore.QSize(0, 0))
-        stdPalette(self.frame_5)
-        self.frame_5.setFrameShape(QtWidgets.QFrame.StyledPanel)
-        self.frame_5.setFrameShadow(QtWidgets.QFrame.Raised)
-        self.frame_5.setObjectName(_fromUtf8("frame_5"))
-        self.gridLayout_30 = QtWidgets.QGridLayout(self.frame_5)
+        self.observTabFrame = QtWidgets.QFrame(self.ObsSummary)
+        self.stdSizePolicyExpanding(self.observTabFrame)
+        self.observTabFrame.setMinimumSize(QtCore.QSize(0, 0))
+        stdPalette(self.observTabFrame)
+        palette = self.observTabFrame.palette()
+        brush = QtGui.QBrush(QtGui.QColor(100, 255, 255))
+        brush.setStyle(QtCore.Qt.SolidPattern)
+        palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.Window, brush)
+        self.observTabFrame.setPalette(palette)
+        self.observTabFrame.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        self.observTabFrame.setFrameShadow(QtWidgets.QFrame.Raised)
+        self.observTabFrame.setObjectName(_fromUtf8("observTabFrame"))
+        self.gridLayout_30 = QtWidgets.QGridLayout(self.observTabFrame)
         self.gridLayout_30.setObjectName(_fromUtf8("gridLayout_30"))
         
-        spacerItem = QtWidgets.QSpacerItem(40, 20, QtWidgets.QSizePolicy.Expanding,
-                                                   QtWidgets.QSizePolicy.Minimum)
+        spacerItem = QtWidgets.QSpacerItem(40, 20,
+                                           QtWidgets.QSizePolicy.Expanding,
+                                           QtWidgets.QSizePolicy.Minimum)
         self.gridLayout_30.addItem(spacerItem, 0, 3, 1, 1)
         
         self.gridLayout_16 = QtWidgets.QGridLayout()
         self.gridLayout_16.setObjectName(_fromUtf8("gridLayout_16"))
         
-        self.frame_6 = QtWidgets.QFrame(self.frame_5)
+        self.frame_6 = QtWidgets.QFrame(self.observTabFrame)
         self.stdSizePolicyMinimum(self.frame_6)
         self.frame_6.setFrameShape(QtWidgets.QFrame.StyledPanel)
         self.frame_6.setFrameShadow(QtWidgets.QFrame.Raised)
@@ -776,58 +700,33 @@ class Ui_Observatory(object):
         self.horizontalLayout_43 = QtWidgets.QHBoxLayout()
         self.horizontalLayout_43.setObjectName(_fromUtf8("horizontalLayout_43"))
         
-        self.verticalLayout_11 = QtWidgets.QVBoxLayout()
-        self.verticalLayout_11.setObjectName(_fromUtf8("verticalLayout_11"))
+        # firmware parameters labels
+        self.fwParsLabelVLayout = QtWidgets.QVBoxLayout()
+        self.fwParsLabelVLayout.setObjectName(_fromUtf8("fwParsLabelVLayout"))
         
-        self.label_chns_3 = QtWidgets.QLabel(self.frame_6)
-        self.stdSizePolicyPreferred(self.label_chns_3)
-        self.label_chns_3.setMaximumSize(QtCore.QSize(87, 17))
+        self.specChansLabel = QtWidgets.QLabel(self.frame_6)
+        self.stdSizePolicyPreferred(self.specChansLabel)
+        self.specChansLabel.setMaximumSize(QtCore.QSize(87, 17))
         font = QtGui.QFont()
         font.setPointSize(8)
-        self.label_chns_3.setFont(font)
-        self.label_chns_3.setMouseTracking(True)
-        self.label_chns_3.setObjectName(_fromUtf8("label_chns_3"))
-        self.label_chns_3.setText(QtWidgets.QApplication.translate("Observatory",
-         """<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.0//EN\"
-                                  \"http://www.w3.org/TR/REC-html40/strict.dtd\">
-            <html>
-              <body style=\" font-family:\'PT Sans\'; font-size:11pt; 
-                             font-weight:400; font-style:normal;\">
-                <p style=\" margin-top:0px; margin-bottom:0px; margin-left:0px;
-                            margin-right:0px; -qt-block-indent:0;
-                            text-indent:0px;\">
-                  <span style=\" font-family:\'Sans\'; font-size:8pt;\">
-                    Channels
-                  </span>
-                </p>
-              </body>
-            </html>""", None))
-        self.verticalLayout_11.addWidget(self.label_chns_3)
+        self.specChansLabel.setFont(font)
+        self.specChansLabel.setMouseTracking(True)
+        self.specChansLabel.setObjectName(_fromUtf8("specChansLabel"))
+        self.specChansLabel.setText(QtWidgets.QApplication.translate(
+                              "Observatory", self.HTMLformat("Channels"), None))
+        self.fwParsLabelVLayout.addWidget(self.specChansLabel)
         
-        self.label_bw_3 = QtWidgets.QLabel(self.frame_6)
-        self.stdSizePolicyPreferred(self.label_bw_3)
-        self.label_bw_3.setMaximumSize(QtCore.QSize(87, 16))
+        self.bwLabel = QtWidgets.QLabel(self.frame_6)
+        self.stdSizePolicyPreferred(self.bwLabel)
+        self.bwLabel.setMaximumSize(QtCore.QSize(87, 16))
         font = QtGui.QFont()
         font.setPointSize(8)
-        self.label_bw_3.setFont(font)
-        self.label_bw_3.setMouseTracking(True)
-        self.label_bw_3.setObjectName(_fromUtf8("label_bw_3"))
-        self.label_bw_3.setText(QtWidgets.QApplication.translate("Observatory",
-         """<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.0//EN\"
-                                \"http://www.w3.org/TR/REC-html40/strict.dtd\">
-            <html>
-              <body style=\" font-family:\'PT Sans\'; font-size:8pt;
-                             font-weight:400; font-style:normal;\">
-                <p style=\" margin-top:0px; margin-bottom:0px; margin-left:0px;
-                            margin-right:0px; -qt-block-indent:0;
-                            text-indent:0px;\">
-                  <span style=\" font-family:\'Sans\';\">
-                    BW(MHz)
-                  </span>
-                </p>
-              </body>
-            </html>""", None))        
-        self.verticalLayout_11.addWidget(self.label_bw_3)
+        self.bwLabel.setFont(font)
+        self.bwLabel.setMouseTracking(True)
+        self.bwLabel.setObjectName(_fromUtf8("bwLabel"))
+        self.bwLabel.setText(QtWidgets.QApplication.translate(
+                             "Observatory", self.HTMLformat("BW(MHz))"), None)) 
+        self.fwParsLabelVLayout.addWidget(self.bwLabel)
         
         self.label_cf_3 = QtWidgets.QLabel(self.frame_6)
         self.stdSizePolicyPreferred(self.label_cf_3)
@@ -837,22 +736,9 @@ class Ui_Observatory(object):
         self.label_cf_3.setFont(font)
         self.label_cf_3.setMouseTracking(True)
         self.label_cf_3.setObjectName(_fromUtf8("label_cf_3"))
-        self.label_cf_3.setText(QtWidgets.QApplication.translate("Observatory",
-         """<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.0//EN\"
-                                  \"http://www.w3.org/TR/REC-html40/strict.dtd\">
-            <html>
-              <body style=\" font-family:\'PT Sans\'; font-size:8pt;
-                             font-weight:400; font-style:normal;\">
-                <p style=\" margin-top:0px; margin-bottom:0px; margin-left:0px;
-                            margin-right:0px; -qt-block-indent:0;
-                            text-indent:0px;\">
-                  <span style=\" font-family:\'Sans\';\">
-                    CF(MHz)
-                  </span>
-                </p>
-              </body>
-            </html>""", None))
-        self.verticalLayout_11.addWidget(self.label_cf_3)
+        self.label_cf_3.setText(QtWidgets.QApplication.translate(
+                               "Observatory", self.HTMLformat("CF(MHz)"), None))
+        self.fwParsLabelVLayout.addWidget(self.label_cf_3)
         
         self.label_res_3 = QtWidgets.QLabel(self.frame_6)
         self.stdSizePolicyPreferred(self.label_res_3)
@@ -862,22 +748,9 @@ class Ui_Observatory(object):
         self.label_res_3.setFont(font)
         self.label_res_3.setMouseTracking(True)
         self.label_res_3.setObjectName(_fromUtf8("label_res_3"))
-        self.label_res_3.setText(QtWidgets.QApplication.translate("Observatory",
-         """<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.0//EN\"
-                                \"http://www.w3.org/TR/REC-html40/strict.dtd\">
-            <html>
-              <body style=\" font-family:\'PT Sans\'; font-size:8pt;
-                             font-weight:400; font-style:normal;\">
-                <p style=\" margin-top:0px; margin-bottom:0px; margin-left:0px;
-                            margin-right:0px; -qt-block-indent:0;
-                            text-indent:0px;\">
-                  <span style=\" font-family:\'Sans\';\">
-                    Res(kHz)
-                  </span>
-                </p>
-              </body>
-            </html>""", None))
-        self.verticalLayout_11.addWidget(self.label_res_3)
+        self.label_res_3.setText(QtWidgets.QApplication.translate(
+                              "Observatory", self.HTMLformat("Res(kHz)"), None))
+        self.fwParsLabelVLayout.addWidget(self.label_res_3)
         
         self.label_oflw_3 = QtWidgets.QLabel(self.frame_6)
         self.stdSizePolicyPreferred(self.label_oflw_3)
@@ -887,22 +760,9 @@ class Ui_Observatory(object):
         self.label_oflw_3.setFont(font)
         self.label_oflw_3.setMouseTracking(True)
         self.label_oflw_3.setObjectName(_fromUtf8("label_oflw_3"))
-        self.label_oflw_3.setText(QtWidgets.QApplication.translate("Observatory",
-         """<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.0//EN\"
-                                  \"http://www.w3.org/TR/REC-html40/strict.dtd\">
-            <html>
-              <body style=\" font-family:\'PT Sans\'; font-size:8pt;
-                             font-weight:400; font-style:normal;\">
-                <p style=\" margin-top:0px; margin-bottom:0px; margin-left:0px;
-                            margin-right:0px; -qt-block-indent:0;
-                            text-indent:0px;\">
-                  <span style=\" font-family:\'Sans\';\">
-                    Overflw
-                  </span>
-                </p>
-              </body>
-            </html>""", None))
-        self.verticalLayout_11.addWidget(self.label_oflw_3)
+        self.label_oflw_3.setText(QtWidgets.QApplication.translate(
+                               "Observatory", self.HTMLformat("Overflw"), None))
+        self.fwParsLabelVLayout.addWidget(self.label_oflw_3)
         
         self.label_int_3 = QtWidgets.QLabel(self.frame_6)
         self.stdSizePolicyPreferred(self.label_int_3)
@@ -912,24 +772,11 @@ class Ui_Observatory(object):
         self.label_int_3.setFont(font)
         self.label_int_3.setMouseTracking(True)
         self.label_int_3.setObjectName(_fromUtf8("label_int_3"))
-        self.label_int_3.setText(QtWidgets.QApplication.translate("Observatory",
-         """<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.0//EN\"
-                                \"http://www.w3.org/TR/REC-html40/strict.dtd\">
-            <html>
-              <body style=\" font-family:\'PT Sans\'; font-size:11pt;
-                             font-weight:400; font-style:normal;\">
-                <p style=\" margin-top:0px; margin-bottom:0px; margin-left:0px;
-                            margin-right:0px; -qt-block-indent:0;
-                            text-indent:0px;\">
-                  <span style=\" font-family:\'Sans\'; font-size:8pt;\">
-                    Intg time
-                  </span>
-                </p>
-              </body>
-            </html>""", None))
-        self.verticalLayout_11.addWidget(self.label_int_3)
+        self.label_int_3.setText(QtWidgets.QApplication.translate(
+                             "Observatory", self.HTMLformat("Accum's"), None))
+        self.fwParsLabelVLayout.addWidget(self.label_int_3)
         
-        self.horizontalLayout_43.addLayout(self.verticalLayout_11)
+        self.horizontalLayout_43.addLayout(self.fwParsLabelVLayout)
         
         self.SAOparsVerticalLayout = {}
         self.saochan = {}
@@ -942,7 +789,6 @@ class Ui_Observatory(object):
           self.SAOparsVerticalLayout[num] = QtWidgets.QVBoxLayout()
           self.SAOparsVerticalLayout[num].setObjectName(
                                     _fromUtf8("SAOparsVerticalLayout"+str(num)))
-          
           
           self.saochan[num] = QtWidgets.QLCDNumber(self.frame_6)
           self.stdSizePolicyPreferred(self.saochan[num])
@@ -1018,7 +864,7 @@ class Ui_Observatory(object):
         self.gridLayout_16.addWidget(self.frame_6, 1, 0, 1, 1)
         
         # source list and data dir frame
-        self.sourceListDataDirFrame = QtWidgets.QFrame(self.frame_5)
+        self.sourceListDataDirFrame = QtWidgets.QFrame(self.observTabFrame)
         self.stdSizePolicyMinimum(self.sourceListDataDirFrame)
         self.sourceListDataDirFrame.setFrameShape(QtWidgets.QFrame.StyledPanel)
         self.sourceListDataDirFrame.setFrameShadow(QtWidgets.QFrame.Raised) 
@@ -1090,7 +936,7 @@ class Ui_Observatory(object):
         self.gridLayout_16.addWidget(self.sourceListDataDirFrame, 2, 0, 1, 1)
         # end of source list and data dir frame --------------------------------
         
-        self.frame_3 = QtWidgets.QFrame(self.frame_5)
+        self.frame_3 = QtWidgets.QFrame(self.observTabFrame)
         self.stdSizePolicyMinimum(self.frame_3)
 
         self.frame_3.setFrameShape(QtWidgets.QFrame.StyledPanel)
@@ -1099,35 +945,44 @@ class Ui_Observatory(object):
         
         # Tsys recording layout
         #    top row
-        self.gridLayout_20 = QtWidgets.QGridLayout(self.frame_3)
-        self.gridLayout_20.setObjectName(_fromUtf8("gridLayout_20"))
+        self.TsysRecGridLayout = QtWidgets.QGridLayout(self.frame_3)
+        self.TsysRecGridLayout.setObjectName(_fromUtf8("TsysRecGridLayout"))
         
-        self.label_95 = QtWidgets.QLabel(self.frame_3)
+        self.feRFnumLabel = QtWidgets.QLabel(self.frame_3)
         font = QtGui.QFont()
         font.setPointSize(8)
-        self.label_95.setFont(font)
-        self.label_95.setObjectName(_fromUtf8("label_95"))
-        self.label_95.setText(QtWidgets.QApplication.translate(
-                                                     "Observatory", "IF", None))
-        self.gridLayout_20.addWidget(self.label_95, 0, 0, 1, 1)
+        self.feRFnumLabel.setFont(font)
+        self.feRFnumLabel.setObjectName(_fromUtf8("feRFnumLabel"))
+        self.feRFnumLabel.setText(QtWidgets.QApplication.translate(
+                                                     "Observatory", "RF", None))
+        self.TsysRecGridLayout.addWidget(self.feRFnumLabel, 0, 0, 1, 1)
         
-        self.label_112 = QtWidgets.QLabel(self.frame_3)
+        self.feRFsrcLabel = QtWidgets.QLabel(self.frame_3)
         font = QtGui.QFont()
         font.setPointSize(8)
-        self.label_112.setFont(font)
-        self.label_112.setObjectName(_fromUtf8("label_112"))
-        self.label_112.setText(QtWidgets.QApplication.translate(
-                                               "Observatory", "Position", None))
-        self.gridLayout_20.addWidget(self.label_112, 0, 1, 1, 1)
+        self.feRFsrcLabel.setFont(font)
+        self.feRFsrcLabel.setObjectName(_fromUtf8("feRFsrcLabel"))
+        self.feRFsrcLabel.setText(QtWidgets.QApplication.translate(
+                                               "Observatory", "Source", None))
+        self.TsysRecGridLayout.addWidget(self.feRFsrcLabel, 0, 1, 1, 1)
         
-        self.label_115 = QtWidgets.QLabel(self.frame_3)
+        self.fePwrLabel = QtWidgets.QLabel(self.frame_3)
         font = QtGui.QFont()
         font.setPointSize(8)
-        self.label_115.setFont(font)
-        self.label_115.setObjectName(_fromUtf8("label_115"))
-        self.label_115.setText(QtWidgets.QApplication.translate(
+        self.fePwrLabel.setFont(font)
+        self.fePwrLabel.setObjectName(_fromUtf8("fePwrLabel"))
+        self.fePwrLabel.setText(QtWidgets.QApplication.translate(
+                                                   "Observatory", "Power", None))
+        self.TsysRecGridLayout.addWidget(self.fePwrLabel, 0, 3, 1, 1)
+        
+        self.feTsysLabel = QtWidgets.QLabel(self.frame_3)
+        font = QtGui.QFont()
+        font.setPointSize(8)
+        self.feTsysLabel.setFont(font)
+        self.feTsysLabel.setObjectName(_fromUtf8("feTsysLabel"))
+        self.feTsysLabel.setText(QtWidgets.QApplication.translate(
                                                    "Observatory", "Tsys", None))
-        self.gridLayout_20.addWidget(self.label_115, 0, 4, 1, 1)
+        self.TsysRecGridLayout.addWidget(self.feTsysLabel, 0, 4, 1, 1)
         
         self.label_96 = QtWidgets.QLabel(self.frame_3)
         font = QtGui.QFont()
@@ -1136,32 +991,47 @@ class Ui_Observatory(object):
         self.label_96.setObjectName(_fromUtf8("label_96"))
         self.label_96.setText(QtWidgets.QApplication.translate(
                                                     "Observatory", "Rec", None))
-        self.gridLayout_20.addWidget(self.label_96, 0, 5, 1, 1)
+        self.TsysRecGridLayout.addWidget(self.label_96, 0, 5, 1, 1)
         
-        #    IF 1 row
-        self.IFLabel = {}
-        self.combo = {}
+        #    IF rows
+        self.RFLabel = {}
+        self.RFselCombo = {}
+        self.RFpower = {}
         self.tsys = {}
         self.k_led = {}
         for num in [1,2,3,4]:
-          self.IFLabel[num] = QtWidgets.QLabel(self.frame_3)
+          # RF number
+          self.RFLabel[num] = QtWidgets.QLabel(self.frame_3)
           font = QtGui.QFont()
           font.setPointSize(8)
-          self.IFLabel[num].setFont(font)
-          self.IFLabel[num].setObjectName(_fromUtf8("IFLabel"+str(num)))
-          self.IFLabel[num].setText(QtWidgets.QApplication.translate(
+          self.RFLabel[num].setFont(font)
+          self.RFLabel[num].setObjectName(_fromUtf8("RFLabel"+str(num)))
+          self.RFLabel[num].setText(QtWidgets.QApplication.translate(
                                                  "Observatory", str(num), None))
-          self.gridLayout_20.addWidget(self.IFLabel[num], num, 0, 1, 1)
-        
-          self.combo[num] = QtWidgets.QComboBox(self.frame_3)
-          self.stdSizePolicyMinimumExpanding(self.combo[num])
+          self.TsysRecGridLayout.addWidget(self.RFLabel[num], num, 0, 1, 1)
+          # FE channel select
+          self.RFselCombo[num] = QtWidgets.QComboBox(self.frame_3)
+          self.stdSizePolicyMinimumExpanding(self.RFselCombo[num])
           font = QtGui.QFont()
           font.setPointSize(6)
-          self.combo[num].setFont(font)
-          self.combo[num].setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
-          self.combo[num].setObjectName(_fromUtf8("combo"+str(num)))
-          self.gridLayout_20.addWidget(self.combo[num], num, 1, 1, 1)
-        
+          self.RFselCombo[num].setFont(font)
+          self.RFselCombo[num].setSizeAdjustPolicy(
+                                           QtWidgets.QComboBox.AdjustToContents)
+          self.RFselCombo[num].setObjectName(_fromUtf8("combo"+str(num)))
+          self.TsysRecGridLayout.addWidget(self.RFselCombo[num], num, 1, 1, 1)
+          if num in [2,3,4]:
+            self.RFselCombo[num].setCurrentIndex(-1)
+
+          # power
+          self.RFpower[num] = QtWidgets.QLabel(self.frame_3)
+          font = QtGui.QFont()
+          font.setPointSize(8)
+          self.RFpower[num].setFont(font)
+          self.RFpower[num].setObjectName(_fromUtf8("tsys"+str(num)))
+          self.RFpower[num].setText(QtWidgets.QApplication.translate(
+                                              "Observatory", "TextLabel", None))
+          self.TsysRecGridLayout.addWidget(self.RFpower[num], num, 3, 1, 1)
+          # system temperature
           self.tsys[num] = QtWidgets.QLabel(self.frame_3)
           font = QtGui.QFont()
           font.setPointSize(8)
@@ -1169,12 +1039,12 @@ class Ui_Observatory(object):
           self.tsys[num].setObjectName(_fromUtf8("tsys"+str(num)))
           self.tsys[num].setText(QtWidgets.QApplication.translate(
                                               "Observatory", "TextLabel", None))
-          self.gridLayout_20.addWidget(self.tsys[num], num, 4, 1, 1)
-        
+          self.TsysRecGridLayout.addWidget(self.tsys[num], num, 4, 1, 1)
+          # record on/off LED
           self.k_led[num] = KLed(self.frame_3)
           self.k_led[num].setChecked(not self.k_led[num].isChecked())
           self.k_led[num].setObjectName(_fromUtf8("k_led"+str(num)))
-          self.gridLayout_20.addWidget(self.k_led[num], num, 5, 1, 1)
+          self.TsysRecGridLayout.addWidget(self.k_led[num], num, 5, 1, 1)
         
         self.gridLayout_16.addWidget(self.frame_3, 0, 0, 1, 1)
         
@@ -1183,218 +1053,16 @@ class Ui_Observatory(object):
         self.gridLayout_17 = QtWidgets.QGridLayout()
         self.gridLayout_17.setObjectName(_fromUtf8("gridLayout_17"))
         
-        self.frame_11 = QtWidgets.QFrame(self.frame_5)
+        self.frame_11 = QtWidgets.QFrame(self.observTabFrame)
         self.frame_11.setFrameShape(QtWidgets.QFrame.StyledPanel)
         self.frame_11.setFrameShadow(QtWidgets.QFrame.Raised)
         self.frame_11.setObjectName(_fromUtf8("frame_11"))
         
-        # self.observing_parameters_block(Observatory)
         self.obs_pars = ObsParsFrame(Observatory)
         self.gridLayout_17.addWidget(self.obs_pars, 3, 0, 1, 1)
-        """
-        # start: observing parameters block
-        self.obsParsGLayout = QtWidgets.QGridLayout(self.frame_11)
-        self.obsParsGLayout.setObjectName(_fromUtf8("obsParsGLayout"))
         
-        # start: cycles and time/scan layout
-        
-        self.cyclesTimePerScanGridLayout = QtWidgets.QGridLayout()
-        self.cyclesTimePerScanGridLayout.setObjectName(_fromUtf8("cyclesTimePerScanGridLayout"))
-        #    label row
-        self.cyclesLabel = QtWidgets.QLabel(self.frame_11)
-        self.cyclesLabel.setEnabled(True)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.cyclesLabel.setFont(font)
-        self.cyclesLabel.setObjectName(_fromUtf8("cyclesLabel"))
-        self.cyclesLabel.setText(QtWidgets.QApplication.translate(
-                                                 "Observatory", "cycles", None))
-        self.cyclesTimePerScanGridLayout.addWidget(self.cyclesLabel, 0, 0, 1, 1)
-        
-        self.timePerScanLabel = QtWidgets.QLabel(self.frame_11)
-        self.timePerScanLabel.setEnabled(True)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.timePerScanLabel.setFont(font)
-        self.timePerScanLabel.setObjectName(_fromUtf8("timePerScanLabel"))
-        self.timePerScanLabel.setText(QtWidgets.QApplication.translate(
-                                          "Observatory", "time/scan(s):", None))
-        self.cyclesTimePerScanGridLayout.addWidget(self.timePerScanLabel, 0, 1, 1, 1)
-        # spinbox row
-        self.cycles = QtWidgets.QSpinBox(self.frame_11)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.cycles.setFont(font)
-        self.cycles.setMinimum(1)
-        self.cycles.setMaximum(99)
-        self.cycles.setObjectName(_fromUtf8("cycles"))
-        #self.cycles.valueChanged.connect() <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-        self.cyclesTimePerScanGridLayout.addWidget(self.cycles, 1, 0, 1, 1)
-        
-        self.tperscan = QtWidgets.QSpinBox(self.frame_11)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.tperscan.setFont(font)
-        self.tperscan.setMinimum(10)
-        self.tperscan.setMaximum(99999)
-        self.tperscan.setObjectName(_fromUtf8("tperscan"))
-        self.cyclesTimePerScanGridLayout.addWidget(self.tperscan, 1, 1, 1, 1)
-        # end: cycles and time/scan layout
-        self.obsParsGLayout.addLayout(self.cyclesTimePerScanGridLayout, 0, 0, 1, 1)
-        
-        # start: scans and timer labels
-        self.scansTimerVLayout = QtWidgets.QVBoxLayout()
-        self.scansTimerVLayout.setObjectName(_fromUtf8("scansTimerVLayout"))
-        
-        self.scansLabel = QtWidgets.QLabel(self.frame_11)
-        self.stdSizePolicyMinimum(self.scansLabel)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.scansLabel.setFont(font)
-        self.scansLabel.setObjectName(_fromUtf8("scansLabel"))
-        self.scansLabel.setText(QtWidgets.QApplication.translate(
-                                                 "Observatory", "scans:", None))
-        self.scansTimerVLayout.addWidget(self.scansLabel)
-        
-        self.timerLabel = QtWidgets.QLabel(self.frame_11)
-        self.stdSizePolicyMinimum(self.timerLabel)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.timerLabel.setFont(font)
-        self.timerLabel.setObjectName(_fromUtf8("timerLabel"))
-        self.timerLabel.setText(QtWidgets.QApplication.translate(
-                                                 "Observatory", "timer:", None))
-        self.scansTimerVLayout.addWidget(self.timerLabel)
-        # end: scans and timer labels
-        self.obsParsGLayout.addLayout(self.scansTimerVLayout, 0, 1, 1, 1)
-        
-        # start: scans and timer values column
-        self.scansTimerValueVLayout = QtWidgets.QVBoxLayout()
-        self.scansTimerValueVLayout.setObjectName(_fromUtf8("scansTimerValueVLayout"))
-        
-        self.lcd_cycles = QtWidgets.QLabel(self.frame_11)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.lcd_cycles.setFont(font)
-        self.lcd_cycles.setObjectName(_fromUtf8("lcd_cycles"))
-        self.lcd_cycles.setText(QtWidgets.QApplication.translate(
-                                                     "Observatory", "-1", None))
-        self.scansTimerValueVLayout.addWidget(self.lcd_cycles)
-        
-        self.obs_time = QtWidgets.QLabel(self.frame_11)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.obs_time.setFont(font)
-        self.obs_time.setObjectName(_fromUtf8("obs_time"))
-        self.obs_time.setText(QtWidgets.QApplication.translate(
-                                                      "Observatory", "0", None))
-        self.scansTimerValueVLayout.addWidget(self.obs_time)
-        # end: scans and time values column
-        self.obsParsGLayout.addLayout(self.scansTimerValueVLayout, 0, 2, 1, 1)
-        
-        # start: total time row
-        self.totalTHLayout = QtWidgets.QHBoxLayout()
-        self.totalTHLayout.setObjectName(_fromUtf8("totalTHLayout"))
-        
-        self.totalTLabel = QtWidgets.QLabel(self.frame_11)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.totalTLabel.setFont(font)
-        self.totalTLabel.setObjectName(_fromUtf8("totalTLabel"))
-        self.totalTLabel.setText(QtWidgets.QApplication.translate(
-                                                 "Observatory", "Ttotal", None))
-        self.totalTHLayout.addWidget(self.totalTLabel)
-        
-        self.pos_interval = QtWidgets.QDoubleSpinBox(self.frame_11)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.pos_interval.setFont(font)
-        self.pos_interval.setMinimum(1.0)
-        self.pos_interval.setMaximum(120.0)
-        self.pos_interval.setObjectName(_fromUtf8("pos_interval"))
-        self.totalTHLayout.addWidget(self.pos_interval)
-        
-        self.minutesLabel = QtWidgets.QLabel(self.frame_11)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.minutesLabel.setFont(font)
-        self.minutesLabel.setObjectName(_fromUtf8("minutesLabel"))
-        self.minutesLabel.setText(QtWidgets.QApplication.translate(
-                                                    "Observatory", "min", None))
-        self.totalTHLayout.addWidget(self.minutesLabel)
-        # end: total time row
-        self.obsParsGLayout.addLayout(self.totalTHLayout, 1, 0, 1, 3)
-                
-        # start: observing modes column
-        self.obsModeVLayout = QtWidgets.QVBoxLayout()
-        self.obsModeVLayout.setObjectName(_fromUtf8("obsModeVLayout"))
-        
-        self.nod_bg = QtWidgets.QButtonGroup(Observatory)
-        self.nod_bg.setObjectName(_fromUtf8("nod_bg"))
-        
-        self.sr_nodding = QtWidgets.QCheckBox(self.frame_11)
-        self.sr_nodding.setToolTip("Beam switching or 'chopping'")
-        self.sr_nodding.setEnabled(False)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.sr_nodding.setFont(font)
-        self.sr_nodding.setCheckable(True)
-        self.sr_nodding.setObjectName(_fromUtf8("sr_nodding"))
-        self.sr_nodding.setText(QtWidgets.QApplication.translate(
-                                              "Observatory", "Feed Xing", None))
-        self.nod_bg.addButton(self.sr_nodding)
-        self.obsModeVLayout.addWidget(self.sr_nodding)
-        
-        self.pos_switch = QtWidgets.QCheckBox(self.frame_11)
-        self.pos_switch.setToolTip("Position switching or 'nodding'")
-        self.pos_switch.setEnabled(True)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.pos_switch.setFont(font)
-        self.pos_switch.setCheckable(True)
-        self.pos_switch.setChecked(True)
-        self.pos_switch.setObjectName(_fromUtf8("pos_switch"))
-        self.pos_switch.setText(QtWidgets.QApplication.translate(
-                                            "Observatory", "Antenna Nod", None))
-        self.obsModeVLayout.addWidget(self.pos_switch)
-        
-        self.horizontalLayout_4 = QtWidgets.QHBoxLayout()
-        self.horizontalLayout_4.setObjectName(_fromUtf8("horizontalLayout_4"))
-        
-        self.onsourceFeedLabel = QtWidgets.QLabel(self.frame_11)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.onsourceFeedLabel.setFont(font)
-        self.onsourceFeedLabel.setObjectName(_fromUtf8("onsourceFeedLabel"))
-        self.onsourceFeedLabel.setText(QtWidgets.QApplication.translate(
-                                          "Observatory", "Onsource Feed", None))
-        self.horizontalLayout_4.addWidget(self.onsourceFeedLabel)
-        
-        self.obsModeVLayout.addLayout(self.horizontalLayout_4)
-        
-        self.beam_switch = QtWidgets.QCheckBox(self.frame_11)
-        self.beam_switch.setEnabled(False)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.beam_switch.setFont(font)
-        self.beam_switch.setCheckable(True)
-        self.beam_switch.setObjectName(_fromUtf8("beam_switch"))
-        self.beam_switch.setText(QtWidgets.QApplication.translate(
-                                            "Observatory", "Beam switch", None))
-        self.obsModeVLayout.addWidget(self.beam_switch)
-        # end: observing modes column
-        self.obsParsGLayout.addLayout(self.obsModeVLayout, 2, 0, 1, 3)
-        # end: observing parameters block
-        """
-        
-        #self.gridLayout_17.addWidget(self.frame_11, 3, 0, 1, 1)
-        self.frame_12 = QtWidgets.QFrame(self.frame_5)
-        sizePolicy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Expanding,
-                                           QtWidgets.QSizePolicy.Expanding)
-        sizePolicy.setHorizontalStretch(0)
-        sizePolicy.setVerticalStretch(0)
-        sizePolicy.setHeightForWidth(self.frame_12.sizePolicy().hasHeightForWidth())
-        self.frame_12.setSizePolicy(sizePolicy)
+        self.frame_12 = QtWidgets.QFrame(self.observTabFrame)
+        self.stdSizePolicyExpanding(self.frame_12)
         self.frame_12.setFrameShape(QtWidgets.QFrame.StyledPanel)
         self.frame_12.setFrameShadow(QtWidgets.QFrame.Raised)
         self.frame_12.setObjectName(_fromUtf8("frame_12"))
@@ -1409,7 +1077,7 @@ class Ui_Observatory(object):
         font.setBold(False)
         font.setWeight(50)
         self.antStatLabel.setFont(font)
-        self.antStatLabel.setObjectName(_fromUtf8("label_79"))
+        self.antStatLabel.setObjectName(_fromUtf8("antStatLabel"))
         self.antStatLabel.setText(QtWidgets.QApplication.translate(
                                                "Observatory", "Ant Stat", None))
         self.gridLayout_66.addWidget(self.antStatLabel, 0, 0, 1, 1)
@@ -1501,7 +1169,7 @@ class Ui_Observatory(object):
         self.elOffsetLabel.setFont(font)
         self.elOffsetLabel.setObjectName(_fromUtf8("label_15"))
         self.elOffsetLabel.setText(QtWidgets.QApplication.translate(
-                                         "Observatory", "Offset El(deg)", None))
+                                         "Observatory", "Offset El(mdeg)", None))
         self.gridLayout_66.addWidget(self.elOffsetLabel, 4, 0, 1, 1)
         
         self.el_offset = QtWidgets.QLabel(self.frame_12)
@@ -1520,7 +1188,7 @@ class Ui_Observatory(object):
         self.label_16.setFont(font)
         self.label_16.setObjectName(_fromUtf8("label_16"))
         self.label_16.setText(QtWidgets.QApplication.translate(
-                                        "Observatory", "Offset xEl(deg)", None))
+                                        "Observatory", "Offset xEl(mdeg)", None))
         self.gridLayout_66.addWidget(self.label_16, 5, 0, 1, 1)
         
         self.xel_offset = QtWidgets.QLabel(self.frame_12)
@@ -1531,14 +1199,10 @@ class Ui_Observatory(object):
         self.xel_offset.setText(QtWidgets.QApplication.translate(
                                                     "Observatory", "0.0", None))
         self.gridLayout_66.addWidget(self.xel_offset, 5, 1, 1, 1)
-        
-        spacerItem2 = QtWidgets.QSpacerItem(40, 20,
-          QtWidgets.QSizePolicy.MinimumExpanding, QtWidgets.QSizePolicy.Minimum)
-        self.gridLayout_66.addItem(spacerItem2, 8, 0, 1, 1)
-        
+                
         self.gridLayout_17.addWidget(self.frame_12, 1, 0, 1, 1)
         
-        self.frame_15 = QtWidgets.QFrame(self.frame_5)
+        self.frame_15 = QtWidgets.QFrame(self.observTabFrame)
         self.frame_15.setFrameShape(QtWidgets.QFrame.StyledPanel)
         self.frame_15.setFrameShadow(QtWidgets.QFrame.Raised)
         self.frame_15.setObjectName(_fromUtf8("frame_15"))
@@ -1546,7 +1210,7 @@ class Ui_Observatory(object):
         
         self.horizontalLayout_9 = QtWidgets.QHBoxLayout()
         self.horizontalLayout_9.setObjectName(_fromUtf8("horizontalLayout_9"))
-        self.label_du = QtWidgets.QLabel(self.frame_5)
+        self.label_du = QtWidgets.QLabel(self.observTabFrame)
         self.stdSizePolicyPreferred(self.label_du)
         self.label_du.setMaximumSize(QtCore.QSize(61, 26))
         self.label_du.setObjectName(_fromUtf8("label_du"))
@@ -1567,7 +1231,7 @@ class Ui_Observatory(object):
             </html>""", None))
         self.horizontalLayout_9.addWidget(self.label_du)
         
-        self.progressBar_1 = QtWidgets.QProgressBar(self.frame_5)
+        self.progressBar_1 = QtWidgets.QProgressBar(self.observTabFrame)
         self.stdSizePolicyPreferred(self.progressBar_1)
         self.progressBar_1.setMinimumSize(QtCore.QSize(0, 0))
         self.progressBar_1.setMaximumSize(QtCore.QSize(108, 26))
@@ -1580,7 +1244,7 @@ class Ui_Observatory(object):
         self.horizontalLayout_9.addWidget(self.progressBar_1)
         self.gridLayout_17.addLayout(self.horizontalLayout_9, 9, 0, 1, 1)
         
-        self.frame_2 = QtWidgets.QFrame(self.frame_5)
+        self.frame_2 = QtWidgets.QFrame(self.observTabFrame)
         self.stdSizePolicyExpanding(self.frame_2)
         self.frame_2.setFrameShape(QtWidgets.QFrame.StyledPanel)
         self.frame_2.setFrameShadow(QtWidgets.QFrame.Raised)
@@ -1703,11 +1367,7 @@ class Ui_Observatory(object):
         self.el_sf.setText(QtWidgets.QApplication.translate(
                                                       "Observatory", "0", None))
         self.gridLayout_21.addWidget(self.el_sf, 5, 3, 1, 1)
-        
-        spacerItem3 = QtWidgets.QSpacerItem(40, 20,
-                 QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Minimum)
-        self.gridLayout_21.addItem(spacerItem3, 9, 1, 1, 1)
-        
+                
         self.source_vel_cb = QtWidgets.QComboBox(self.frame_2)
         self.source_vel_cb.setEnabled(True)
         font = QtGui.QFont()
@@ -1782,7 +1442,7 @@ class Ui_Observatory(object):
         self.startCloseHLayout.setObjectName(_fromUtf8("startCloseHLayout"))
         
         # start: Start Observing
-        self.start_obs = QtWidgets.QPushButton(self.frame_5)
+        self.start_obs = QtWidgets.QPushButton(self.observTabFrame)
         self.start_obs.setEnabled(True)
         self.stdSizePolicyExpanding(self.start_obs)
         self.start_obs.setMaximumSize(QtCore.QSize(100, 50))
@@ -1801,7 +1461,7 @@ class Ui_Observatory(object):
         self.startCloseHLayout.addWidget(self.start_obs)
         
         # start: close APC
-        self.close_apc = QtWidgets.QPushButton(self.frame_5)
+        self.close_apc = QtWidgets.QPushButton(self.observTabFrame)
         closePalette(self.close_apc)
         font = QtGui.QFont()
         font.setPointSize(5)
@@ -1821,7 +1481,7 @@ class Ui_Observatory(object):
         self.horizontalLayout_27 = QtWidgets.QHBoxLayout()
         self.horizontalLayout_27.setObjectName(_fromUtf8("horizontalLayout_27"))
         
-        self.bsOfstSRposFrame = QtWidgets.QFrame(self.frame_5)
+        self.bsOfstSRposFrame = QtWidgets.QFrame(self.observTabFrame)
         self.bsOfstSRposFrame.setEnabled(True)
         self.bsOfstSRposFrame.setFrameShape(QtWidgets.QFrame.StyledPanel)
         self.bsOfstSRposFrame.setFrameShadow(QtWidgets.QFrame.Raised)
@@ -1885,10 +1545,13 @@ class Ui_Observatory(object):
         self.progOffsLayout.addWidget(self.label_225, 0, 0, 1, 1)
         
         self.BSoffsetLabel = QtWidgets.QLabel(self.bsOfstSRposFrame)
+        font = QtGui.QFont()
+        font.setPointSize(8)
+        self.BSoffsetLabel.setFont(font)
         self.BSoffsetLabel.setEnabled(False)
         self.BSoffsetLabel.setObjectName(_fromUtf8("label_91"))
         self.BSoffsetLabel.setText(QtWidgets.QApplication.translate(
-                                             "Observatory", "BS Offsets", None))        
+                                         "Observatory", "BS Offsets", None))
         self.progOffsLayout.addWidget(self.BSoffsetLabel, 0, 3, 1, 1)
         
         self.el_prog_offsets = QtWidgets.QDoubleSpinBox(self.bsOfstSRposFrame)
@@ -1909,30 +1572,35 @@ class Ui_Observatory(object):
         self.gridLayout_33 = QtWidgets.QGridLayout()
         self.gridLayout_33.setObjectName(_fromUtf8("gridLayout_33"))
         
-        self.horizontalLayout_28 = QtWidgets.QHBoxLayout()
-        self.horizontalLayout_28.setObjectName(_fromUtf8("horizontalLayout_28"))
+        self.focusLedHLayout = QtWidgets.QHBoxLayout()
+        self.focusLedHLayout.setObjectName(_fromUtf8("focusLedHLayout"))
         
-        self.kled_12 = KLed(self.bsOfstSRposFrame)
-        self.kled_12.setChecked(not self.kled_12.isChecked())
-        self.kled_12.setObjectName(_fromUtf8("kled_12"))
-        self.horizontalLayout_28.addWidget(self.kled_12)
+        self.leftFocusLED = KLed(self.bsOfstSRposFrame)
+        self.leftFocusLED.setChecked(False)
+        self.leftFocusLED.setObjectName(_fromUtf8("leftFocusLED"))
+        self.focusLedHLayout.addWidget(self.leftFocusLED)
         
-        self.kled_17 = KLed(self.bsOfstSRposFrame)
-        self.kled_17.setObjectName(_fromUtf8("kled_17"))
-        self.horizontalLayout_28.addWidget(self.kled_17)
+        self.cntrFocusLED = KLed(self.bsOfstSRposFrame)
+        self.cntrFocusLED.setChecked(True)
+        self.cntrFocusLED.setObjectName(_fromUtf8("cntrFocusLED"))
+        self.focusLedHLayout.addWidget(self.cntrFocusLED)
         
-        self.kled_14 = KLed(self.bsOfstSRposFrame)
-        self.kled_14.setChecked(not self.kled_14.isChecked())
-        self.kled_14.setObjectName(_fromUtf8("kled_14"))
+        self.rghtFocusLED = KLed(self.bsOfstSRposFrame)
+        self.rghtFocusLED.setChecked(False)
+        self.rghtFocusLED.setObjectName(_fromUtf8("rghtFocusLED"))
+        self.focusLedHLayout.addWidget(self.rghtFocusLED)
         
-        self.horizontalLayout_28.addWidget(self.kled_14)
-        self.gridLayout_33.addLayout(self.horizontalLayout_28, 2, 1, 1, 1)
+        self.gridLayout_33.addLayout(self.focusLedHLayout, 2, 1, 1, 1)
         
         self.SRposLabel = QtWidgets.QLabel(self.bsOfstSRposFrame)
+        font = QtGui.QFont()
+        font.setPointSize(8)
+        self.SRposLabel.setFont(font)
         self.SRposLabel.setObjectName(_fromUtf8("SRposLabel"))
         self.SRposLabel.setText(QtWidgets.QApplication.translate(
                                                  "Observatory", "SR Pos", None))
         self.gridLayout_33.addWidget(self.SRposLabel, 0, 1, 1, 1)
+        
         
         self.horizontalLayout_16.addLayout(self.gridLayout_33)
         self.gridLayout_14.addLayout(self.horizontalLayout_16, 2, 0, 1, 1)
@@ -1943,14 +1611,43 @@ class Ui_Observatory(object):
                  QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Minimum)
         self.gridLayout_18.addItem(spacerItem5, 0, 1, 1, 1)
         
-        self.modeTabWidget = QtWidgets.QTabWidget(self.frame_5)
+        self.modeTabWidget = QtWidgets.QTabWidget(self.observTabFrame)
         tabPalette(self.modeTabWidget)
-        #palette = self.tabPalette()
-        #self.modeTabWidget.setPalette(palette)
         self.modeTabWidget.setObjectName(_fromUtf8("tabWidget"))
         
         self.modeTab = QtWidgets.QWidget()
         self.modeTab.setObjectName(_fromUtf8("Mode"))
+         
+        self.boresightTab = QtWidgets.QWidget()
+        self.boresightTab.setObjectName(_fromUtf8("Boresight"))
+        self.boreTabGridLayout = QtWidgets.QGridLayout()
+        self.boreTabGridLayout.setObjectName(_fromUtf8("boreTabGridLayout"))
+        self.boreParsGridLayout = QtWidgets.QGridLayout(self.boresightTab)
+        self.boreParsGridLayout.addLayout(self.boreTabGridLayout, 0, 0, 1, 1)
+        self.boreParsGridLayout.setObjectName(_fromUtf8("gridLayout_40"))
+        
+        self.tipMapTab = QtWidgets.QWidget()
+        self.tipMapTab.setObjectName(_fromUtf8("tab_3"))
+        self.gridLayout_38 = QtWidgets.QGridLayout(self.tipMapTab)
+        self.gridLayout_38.setObjectName(_fromUtf8("gridLayout_38"))
+        self.frame_16 = QtWidgets.QFrame(self.tipMapTab)
+        self.frame_16.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        self.frame_16.setFrameShadow(QtWidgets.QFrame.Raised)
+        self.frame_16.setObjectName(_fromUtf8("frame_16"))
+        
+        self.modeTabWidget.addTab(self.modeTab, _fromUtf8(""))
+        self.modeTabWidget.setTabText(self.modeTabWidget.indexOf(self.modeTab),
+                  QtWidgets.QApplication.translate("Observatory", "Mode", None))
+                  
+        self.modeTabWidget.addTab(self.boresightTab, _fromUtf8(""))
+        self.modeTabWidget.setTabText(
+                                  self.modeTabWidget.indexOf(self.boresightTab),
+             QtWidgets.QApplication.translate("Observatory", "Boresight", None))
+        
+        self.modeTabWidget.addTab(self.tipMapTab, _fromUtf8(""))
+        self.gridLayout_18.addWidget(self.modeTabWidget, 0, 0, 1, 1)
+        self.modeTabWidget.setTabText(self.modeTabWidget.indexOf(self.tipMapTab),
+               QtWidgets.QApplication.translate("Observatory", "Tip/Map", None))
         
         self.gridLayout_36 = QtWidgets.QGridLayout(self.modeTab)
         self.gridLayout_36.setObjectName(_fromUtf8("gridLayout_36"))
@@ -2075,7 +1772,7 @@ class Ui_Observatory(object):
         self.labelPM = {}
         for num in [1,2,3,4]:
           self.labelPM[num] = QtWidgets.QLabel(self.modeTab)
-          palette = self.pmLabelPalette()
+          palette = pmLabelPalette()
           self.labelPM[num].setPalette(palette)
           font = QtGui.QFont()
           font.setPointSize(9)
@@ -2234,41 +1931,34 @@ class Ui_Observatory(object):
         self.gridLayout_32.addWidget(self.yfactor, 4, 0, 1, 1)
         
         self.gridLayout_36.addWidget(self.frame_13, 1, 0, 1, 1)
-        self.modeTabWidget.addTab(self.modeTab, _fromUtf8(""))
         
-        self.Boresight = QtWidgets.QWidget()
-        self.Boresight.setObjectName(_fromUtf8("Boresight"))
-        self.gridLayout_40 = QtWidgets.QGridLayout(self.Boresight)
         
-        self.gridLayout_40.setObjectName(_fromUtf8("gridLayout_40"))
         
-        self.gridLayout_35 = QtWidgets.QGridLayout()
-        self.gridLayout_35.setObjectName(_fromUtf8("gridLayout_35"))
-        
-        self.label_30 = QtWidgets.QLabel(self.Boresight)
+        self.label_30 = QtWidgets.QLabel(self.boresightTab)
         font = QtGui.QFont()
         font.setPointSize(11)
         self.label_30.setFont(font)
         self.label_30.setObjectName(_fromUtf8("label_30"))
         self.label_30.setText(QtWidgets.QApplication.translate(
                                               "Observatory", "Boresight", None))
-        self.gridLayout_35.addWidget(self.label_30, 0, 0, 1, 1)
+        self.boreTabGridLayout.addWidget(self.label_30, 0, 0, 1, 1)
         
-        self.bs_source_que = QtWidgets.QListWidget(self.Boresight)
+        self.bs_source_que = QtWidgets.QListWidget(self.boresightTab)
         font = QtGui.QFont()
         font.setPointSize(8)
         self.bs_source_que.setFont(font)
         self.bs_source_que.setDragDropMode(QtWidgets.QAbstractItemView.DropOnly)
         self.bs_source_que.setObjectName(_fromUtf8("bs_source_que"))
-        self.gridLayout_35.addWidget(self.bs_source_que, 1, 1, 1, 1)
+        self.bs_source_que.setToolTip("Drag sources here from Source List")
+        self.boreTabGridLayout.addWidget(self.bs_source_que, 1, 1, 1, 1)
         
-        self.label_20 = QtWidgets.QLabel(self.Boresight)
+        self.label_20 = QtWidgets.QLabel(self.boresightTab)
         self.label_20.setObjectName(_fromUtf8("label_20"))
         self.label_20.setText(QtWidgets.QApplication.translate(
                                              "Observatory", "BS sources", None))
-        self.gridLayout_35.addWidget(self.label_20, 0, 1, 1, 1)
+        self.boreTabGridLayout.addWidget(self.label_20, 0, 1, 1, 1)
         
-        self.frame_10 = QtWidgets.QFrame(self.Boresight)
+        self.frame_10 = QtWidgets.QFrame(self.boresightTab)
         self.stdSizePolicyExpanding(self.frame_10)
         self.frame_10.setMinimumSize(QtCore.QSize(0, 0))
         self.frame_10.setMaximumSize(QtCore.QSize(361, 161))
@@ -2308,10 +1998,12 @@ class Ui_Observatory(object):
         self.horizontalLayout_34.setObjectName(_fromUtf8("horizontalLayout_34"))
         
         self.label_24 = QtWidgets.QLabel(self.frame_10)
-        sizePolicy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+        sizePolicy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Fixed,
+                                           QtWidgets.QSizePolicy.Fixed)
         sizePolicy.setHorizontalStretch(0)
         sizePolicy.setVerticalStretch(0)
-        sizePolicy.setHeightForWidth(self.label_24.sizePolicy().hasHeightForWidth())
+        sizePolicy.setHeightForWidth(
+                                 self.label_24.sizePolicy().hasHeightForWidth())
         self.label_24.setSizePolicy(sizePolicy)
         font = QtGui.QFont()
         font.setPointSize(8)
@@ -2326,10 +2018,12 @@ class Ui_Observatory(object):
         self.horizontalLayout_35 = QtWidgets.QHBoxLayout()
         self.horizontalLayout_35.setObjectName(_fromUtf8("horizontalLayout_35"))
         self.label_31 = QtWidgets.QLabel(self.frame_10)
-        sizePolicy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+        sizePolicy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Fixed,
+                                                    QtWidgets.QSizePolicy.Fixed)
         sizePolicy.setHorizontalStretch(0)
         sizePolicy.setVerticalStretch(0)
-        sizePolicy.setHeightForWidth(self.label_31.sizePolicy().hasHeightForWidth())
+        sizePolicy.setHeightForWidth(
+                                 self.label_31.sizePolicy().hasHeightForWidth())
         self.label_31.setSizePolicy(sizePolicy)
         font = QtGui.QFont()
         font.setPointSize(8)
@@ -2344,10 +2038,12 @@ class Ui_Observatory(object):
         self.horizontalLayout_36 = QtWidgets.QHBoxLayout()
         self.horizontalLayout_36.setObjectName(_fromUtf8("horizontalLayout_36"))
         self.label_25 = QtWidgets.QLabel(self.frame_10)
-        sizePolicy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+        sizePolicy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Fixed,
+                                                    QtWidgets.QSizePolicy.Fixed)
         sizePolicy.setHorizontalStretch(0)
         sizePolicy.setVerticalStretch(0)
-        sizePolicy.setHeightForWidth(self.label_25.sizePolicy().hasHeightForWidth())
+        sizePolicy.setHeightForWidth(
+                                 self.label_25.sizePolicy().hasHeightForWidth())
         self.label_25.setSizePolicy(sizePolicy)
         font = QtGui.QFont()
         font.setPointSize(8)
@@ -2365,10 +2061,12 @@ class Ui_Observatory(object):
         self.horizontalLayout_37 = QtWidgets.QHBoxLayout()
         self.horizontalLayout_37.setObjectName(_fromUtf8("horizontalLayout_37"))
         self.label_32 = QtWidgets.QLabel(self.frame_10)
-        sizePolicy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+        sizePolicy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Fixed,
+                                           QtWidgets.QSizePolicy.Fixed)
         sizePolicy.setHorizontalStretch(0)
         sizePolicy.setVerticalStretch(0)
-        sizePolicy.setHeightForWidth(self.label_32.sizePolicy().hasHeightForWidth())
+        sizePolicy.setHeightForWidth(
+                                 self.label_32.sizePolicy().hasHeightForWidth())
         self.label_32.setSizePolicy(sizePolicy)
         font = QtGui.QFont()
         font.setPointSize(8)
@@ -2389,11 +2087,10 @@ class Ui_Observatory(object):
         self.kled.setObjectName(_fromUtf8("kled"))
         self.horizontalLayout_38.addWidget(self.kled)
         
-        spacerItem6 = QtWidgets.QSpacerItem(20, 40, QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Expanding)
+        spacerItem6 = QtWidgets.QSpacerItem(20, 40,
+                 QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Expanding)
         self.horizontalLayout_38.addItem(spacerItem6)
         self.calc_bs_results = QtWidgets.QPushButton(self.frame_10)
-        #palette = self.
-        #self.calc_bs_results.setPalette(palette)
         bsPalette(self.calc_bs_results)
         self.calc_bs_results.setCheckable(True)
         self.calc_bs_results.setAutoExclusive(True)
@@ -2401,10 +2098,10 @@ class Ui_Observatory(object):
         self.horizontalLayout_38.addWidget(self.calc_bs_results)
         self.verticalLayout_4.addLayout(self.horizontalLayout_38)
         self.gridLayout_13.addLayout(self.verticalLayout_4, 1, 0, 1, 1)
-        self.gridLayout_35.addWidget(self.frame_10, 1, 0, 1, 1)
+        self.boreTabGridLayout.addWidget(self.frame_10, 1, 0, 1, 1)
         
         # boresight plot
-        self.bore_mpl = QtWidgets.QWidget(self.Boresight)
+        self.bore_mpl = QtWidgets.QWidget(self.boresightTab)
         self.stdSizePolicyExpanding(self.bore_mpl)
         self.bore_mpl.setMinimumSize(QtCore.QSize(0, 0))
         self.bore_mpl.setObjectName(_fromUtf8("bore_mpl"))
@@ -2417,12 +2114,10 @@ class Ui_Observatory(object):
         self.bore_VBL.addWidget(self.bore_canvas)
         self.bore_NTB = NavigationToolbar(self.bore_canvas, self.bore_mpl)
         self.bore_VBL.addWidget(self.bore_NTB)
-        self.gridLayout_35.addWidget(self.bore_mpl, 3, 0, 1, 2)
+        self.boreTabGridLayout.addWidget(self.bore_mpl, 3, 0, 1, 2)
         
-        self.slew_to_source = QtWidgets.QPushButton(self.Boresight)
+        self.slew_to_source = QtWidgets.QPushButton(self.boresightTab)
         self.slew_to_source.setToolTip('Send source to antenna and track')
-        #palette = self.bs2Palette()
-        #self.slew_to_source.setPalette(palette)
         bs2Palette(self.slew_to_source)
         font = QtGui.QFont()
         font.setPointSize(8)
@@ -2431,20 +2126,9 @@ class Ui_Observatory(object):
         self.slew_to_source.setObjectName(_fromUtf8("slew_to_source"))
         self.slew_to_source.setText(QtWidgets.QApplication.translate(
                                          "Observatory", "slew to source", None))
-        self.gridLayout_35.addWidget(self.slew_to_source, 2, 0, 1, 1)
+        self.boreTabGridLayout.addWidget(self.slew_to_source, 2, 0, 1, 1)
         
-        self.gridLayout_40.addLayout(self.gridLayout_35, 0, 0, 1, 1)
         
-        self.modeTabWidget.addTab(self.Boresight, _fromUtf8(""))
-        self.tab_3 = QtWidgets.QWidget()
-        self.tab_3.setObjectName(_fromUtf8("tab_3"))
-        self.gridLayout_38 = QtWidgets.QGridLayout(self.tab_3)
-        self.gridLayout_38.setObjectName(_fromUtf8("gridLayout_38"))
-        
-        self.frame_16 = QtWidgets.QFrame(self.tab_3)
-        self.frame_16.setFrameShape(QtWidgets.QFrame.StyledPanel)
-        self.frame_16.setFrameShadow(QtWidgets.QFrame.Raised)
-        self.frame_16.setObjectName(_fromUtf8("frame_16"))
         
         self.gridLayout_44 = QtWidgets.QGridLayout(self.frame_16)
         self.gridLayout_44.setObjectName(_fromUtf8("gridLayout_44"))
@@ -2496,12 +2180,9 @@ class Ui_Observatory(object):
         self.beammap_mpl.setObjectName(_fromUtf8("beammap_mpl"))
         self.beammap_fig = Figure()
         self.beammap_canvas = FigureCanvas(self.beammap_fig)
-        self.beammap_axes = self.beammap_fig.add_subplot(111, projection="polar")
-        self.beammap_axes.grid(color='grey', linestyle='--', linewidth=0.5)
-        self.beammap_axes.set_title("Beam Scan Plot", fontsize=8)
-        self.beammap_axes.set_theta_zero_location('N')
-        self.beammap_axes.invert_yaxis()
-        self.beammap_axes.set_theta_direction(-1)
+        self.beammap_axes = makeSkyMapAxes(self, self.beammap_fig, 
+                                      polar=True,
+                                      title="Beam Scan Plot", azticks=45)
         self.beammap_VLB = QtWidgets.QVBoxLayout(self.beammap_mpl)
         self.beammap_VLB.addWidget(self.beammap_canvas)
         self.verticalLayout_20.addWidget(self.beammap_mpl)
@@ -2523,8 +2204,6 @@ class Ui_Observatory(object):
         
         self.gridLayout_38.addWidget(self.frame_16, 0, 0, 1, 1)
         
-        self.modeTabWidget.addTab(self.tab_3, _fromUtf8(""))
-        self.gridLayout_18.addWidget(self.modeTabWidget, 0, 0, 1, 1)
         
         self.gridLayout_30.addLayout(self.gridLayout_18, 0, 2, 1, 1)
         
@@ -2532,20 +2211,21 @@ class Ui_Observatory(object):
         self.gridLayout_19.setObjectName(_fromUtf8("gridLayout_19"))
         
         # system temperature plot
-        self.tsys_widget = QtWidgets.QWidget(self.frame_5)
+        self.tsys_widget = QtWidgets.QWidget(self.observTabFrame)
         self.stdSizePolicyExpanding( self.tsys_widget)
         self.tsys_widget.setMinimumSize(QtCore.QSize(289, 191))
         self.tsys_widget.setMaximumSize(QtCore.QSize(1000, 1000))
         self.tsys_widget.setObjectName(_fromUtf8("tsys_widget"))
         self.tsys_fig = Figure()
         self.tsys_canvas = FigureCanvas(self.tsys_fig)
+        self.tsys_canvas.setToolTip("Front end system\ntemperature (K)")
         self.tsys_axes = self.tsys_fig.add_subplot(111)
-        self.tsys_axes.set_title("Tsys vs Time", fontsize=8)
-        self.tsys_axes.set_ylabel ('Tsys(K)', fontsize = 'smaller')
-        self.tsys_axes.set_xlabel ('Time (sec)', fontsize = 'smaller')
+        self.tsys_axes.set_title("Tsys vs Time", fontsize=8) # not showing
+        self.tsys_axes.set_ylabel ('Tsys(K)', fontsize = 'smaller') # not show
+        self.tsys_axes.set_xlabel ('Time (sec)', fontsize = 'smaller') # no show
         self.tsys_axes.tick_params(axis='both', which='major', labelsize=8)
-        self.tsys_axes.set_title("W vs Time", fontsize=8)
-        self.tsys_axes.set_ylabel ('ND(W)', fontsize = 'smaller')
+        self.tsys_axes.set_title("W vs Time", fontsize=8) # not showing
+        self.tsys_axes.set_ylabel ('ND(W)', fontsize = 'smaller') # not showing
         self.tsys_canvas.draw()
         self.tsys_VBL = QtWidgets.QVBoxLayout(self.tsys_widget)
         self.tsys_VBL.addWidget(self.tsys_canvas)
@@ -2559,7 +2239,7 @@ class Ui_Observatory(object):
         self.gridLayout_19.addItem(spacerItem7, 3, 0, 1, 1)
         
         # source location on Observations page
-        self.source_mpl = QtWidgets.QWidget(self.frame_5)
+        self.source_mpl = QtWidgets.QWidget(self.observTabFrame)
         self.source_mpl.setToolTip('Antenna direction')
         self.stdSizePolicyExpanding(self.source_mpl)
         self.source_mpl.setMinimumSize(QtCore.QSize(289, 191))
@@ -2567,16 +2247,11 @@ class Ui_Observatory(object):
         self.source_mpl.setObjectName(_fromUtf8("source_mpl"))
         self.source_fig = Figure()
         self.source_canvas = FigureCanvas(self.source_fig)
-        self.source_axes = self.source_fig.add_subplot(111, projection="polar")
-        self.source_axes.set_theta_direction(-1)
-        self.source_axes.set_theta_zero_location('N')
-        self.source_axes.set_ylim(0,90)
-        self.source_axes.invert_yaxis()
-        self.source_axes.set_thetagrids(numpy.arange(0, 360, 20))
-        self.source_axes.grid(color='grey', linestyle='--', linewidth=0.5)
-        self.source_axes.set_title("Antenna Az-El Plot", fontsize=8)
-        self.azel_mark, = self.source_axes.plot(0, 90,
-                             marker='o', color='red')
+        self.source_axes =  makeSkyMapAxes(self, self.source_fig, 
+                                      polar=True,
+                                      title="Antenna Az-El", azticks=45)
+        logger.debug("setupUi: 'source_axes' is %s", self.source_axes)
+        self.azel_mark, = self.source_axes.plot(0, 90, marker='o', color='red')
         self.source_VBL = QtWidgets.QVBoxLayout(self.source_mpl)
         self.source_VBL.addWidget(self.source_canvas)
         self.source_NTB = NavigationToolbar(self.source_canvas, self.source_mpl)
@@ -2585,7 +2260,7 @@ class Ui_Observatory(object):
         
         self.gridLayout_30.addLayout(self.gridLayout_19, 0, 0, 1, 1)
         
-        self.gridLayout_28.addWidget(self.frame_5, 0, 0, 1, 1)
+        self.gridLayout_28.addWidget(self.observTabFrame, 0, 0, 1, 1)
         
         self.gridLayout_27.addLayout(self.gridLayout_28, 0, 0, 1, 1)
         
@@ -2596,8 +2271,15 @@ class Ui_Observatory(object):
         # end of Observations page
         
         # page for the Catalogues tab ##########################################
+        
         self.Sources = QtWidgets.QWidget()
+        self.Sources.name = "Sources"
         self.Sources.setObjectName(_fromUtf8("Sources"))
+        palette = self.Sources.palette()
+        brush = QtGui.QBrush(QtGui.QColor(100, 255, 255))
+        brush.setStyle(QtCore.Qt.SolidPattern)
+        palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.Window, brush)
+        self.Sources.setPalette(palette)
         
         # right side of the page
         self.CatalogTabLayout = QtWidgets.QGridLayout(self.Sources)
@@ -2607,14 +2289,15 @@ class Ui_Observatory(object):
         self.modeTabWidget_2 = QtWidgets.QTabWidget(self.Sources)
         self.modeTabWidget_2.setObjectName(_fromUtf8("tabWidget_2"))
         
-        self.tab = QtWidgets.QWidget()
-        self.tab.setObjectName(_fromUtf8("tab"))
+        # source tracker tab
+        self.srcTrackTab = QtWidgets.QWidget()
+        self.srcTrackTab.setObjectName(_fromUtf8("srcTrackTab"))
         
-        self.gridLayout_37 = QtWidgets.QGridLayout(self.tab)
-        self.gridLayout_37.setObjectName(_fromUtf8("gridLayout_37"))
+        self.srcTrackGLayout = QtWidgets.QGridLayout(self.srcTrackTab)
+        self.srcTrackGLayout.setObjectName(_fromUtf8("srcTrackGLayout"))
         
         # elevation vs time plot
-        self.EltimeSource = QtWidgets.QWidget(self.tab)
+        self.EltimeSource = QtWidgets.QWidget(self.srcTrackTab)
         self.stdSizePolicyMinimum(self.EltimeSource)
         self.EltimeSource.setMinimumSize(QtCore.QSize(175, 175))
         self.EltimeSource.setMaximumSize(QtCore.QSize(275, 275))
@@ -2629,9 +2312,9 @@ class Ui_Observatory(object):
         self.vbl9.addWidget(self.ElTime_canvas)
         self.ntb9 = NavigationToolbar(self.ElTime_canvas, self.EltimeSource)
         self.vbl9.addWidget(self.ntb9)
-        self.gridLayout_37.addWidget(self.EltimeSource, 0, 0, 1, 1)
+        self.srcTrackGLayout.addWidget(self.EltimeSource, 0, 0, 1, 1)
         
-        self.frame_14 = QtWidgets.QFrame(self.tab)
+        self.frame_14 = QtWidgets.QFrame(self.srcTrackTab)
         self.frame_14.setFrameShape(QtWidgets.QFrame.StyledPanel)
         self.frame_14.setFrameShadow(QtWidgets.QFrame.Raised)
         self.frame_14.setObjectName(_fromUtf8("frame_14"))
@@ -2642,18 +2325,21 @@ class Ui_Observatory(object):
         self.gridLayout_9 = QtWidgets.QGridLayout()
         self.gridLayout_9.setObjectName(_fromUtf8("gridLayout_9"))
         
-        self.label_66 = QtWidgets.QLabel(self.frame_14)
+        # source info block on Catalogues page (right column)
+        #    label
+        self.sourceInfoLabel = QtWidgets.QLabel(self.frame_14)
         font = QtGui.QFont()
         font.setPointSize(8)
-        self.label_66.setFont(font)
-        self.label_66.setObjectName(_fromUtf8("label_66"))
-        self.label_66.setText(QtWidgets.QApplication.translate(
+        self.sourceInfoLabel.setFont(font)
+        self.sourceInfoLabel.setObjectName(_fromUtf8("sourceInfoLabel"))
+        self.sourceInfoLabel.setText(QtWidgets.QApplication.translate(
                                             "Observatory", "Source Info", None))
-        self.gridLayout_9.addWidget(self.label_66, 0, 0, 1, 1)
-        self.verticalLayout_14 = QtWidgets.QVBoxLayout()
-        self.verticalLayout_14.setSizeConstraint(QtWidgets.QLayout.SetMinimumSize)
-        self.verticalLayout_14.setObjectName(_fromUtf8("verticalLayout_14"))
+        self.gridLayout_9.addWidget(self.sourceInfoLabel, 0, 0, 1, 1)
         
+        self.srcCatgCatlVLayout = QtWidgets.QVBoxLayout()
+        self.srcCatgCatlVLayout.setSizeConstraint(QtWidgets.QLayout.SetMinimumSize)
+        self.srcCatgCatlVLayout.setObjectName(_fromUtf8("srcCatgCatlVLayout"))
+        #    text window
         self.sourceInfo = QtWidgets.QPlainTextEdit(self.frame_14)
         font = QtGui.QFont()
         font.setPointSize(8)
@@ -2662,18 +2348,18 @@ class Ui_Observatory(object):
         self.sourceInfo.setObjectName(_fromUtf8("sourceInfo"))
         self.sourceInfo.setPlainText(QtWidgets.QApplication.translate(
                                       "Observatory", "source_unselected", None))
-        self.verticalLayout_14.addWidget(self.sourceInfo)
+        self.srcCatgCatlVLayout.addWidget(self.sourceInfo)
         
         self.horizontalLayout_39 = QtWidgets.QHBoxLayout()
         self.horizontalLayout_39.setObjectName(_fromUtf8("horizontalLayout_39"))
-        self.verticalLayout_14.addLayout(self.horizontalLayout_39)
+        self.srcCatgCatlVLayout.addLayout(self.horizontalLayout_39)
         
         self.dateTimeEdit = QtWidgets.QDateTimeEdit(self.frame_14)
         font = QtGui.QFont()
         font.setPointSize(8)
         self.dateTimeEdit.setFont(font)
         self.dateTimeEdit.setObjectName(_fromUtf8("dateTimeEdit"))
-        self.verticalLayout_14.addWidget(self.dateTimeEdit)
+        self.srcCatgCatlVLayout.addWidget(self.dateTimeEdit)
         
         self.horizontalLayout_47 = QtWidgets.QHBoxLayout()
         self.horizontalLayout_47.setObjectName(_fromUtf8("horizontalLayout_47"))
@@ -2685,7 +2371,7 @@ class Ui_Observatory(object):
         font.setPointSize(8)
         self.pick_source.setFont(font)
         icon1 = QtGui.QIcon()
-        icon1.addPixmap(QtGui.QPixmap(_fromUtf8("reverse.png")),
+        icon1.addPixmap(QtGui.QPixmap(_fromUtf8("back.png")),
                         QtGui.QIcon.Normal, QtGui.QIcon.Off)
         self.pick_source.setIcon(icon1)
         self.pick_source.setIconSize(QtCore.QSize(20, 20))
@@ -2705,12 +2391,10 @@ class Ui_Observatory(object):
         font.setPointSize(8)
         self.find_nearest.setFont(font)
         icon2 = QtGui.QIcon()
-        icon2.addPixmap(QtGui.QPixmap(
-        _fromUtf8("../../../../../../../../../../../../../../../../../../../../../home/asoni/.designer/backup/png/play.png")),
-         QtGui.QIcon.Normal, QtGui.QIcon.Off)
-        icon2.addPixmap(QtGui.QPixmap(
-        _fromUtf8("../../../../../../../../../../../../../../../../../../../../../home/asoni/.designer/backup/png/pause.png")),
-         QtGui.QIcon.Disabled, QtGui.QIcon.Off)
+        icon2.addPixmap(QtGui.QPixmap(_fromUtf8("play.png")),
+                                            QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        icon2.addPixmap(QtGui.QPixmap(_fromUtf8("pause.png")),
+                                          QtGui.QIcon.Disabled, QtGui.QIcon.Off)
         self.find_nearest.setIcon(icon2)
         self.find_nearest.setIconSize(QtCore.QSize(20, 20))
         self.find_nearest.setCheckable(False)
@@ -2723,15 +2407,16 @@ class Ui_Observatory(object):
         self.find_nearest.setText(QtWidgets.QApplication.translate(
                                              "Observatory", "nearest BS", None))
         self.horizontalLayout_47.addWidget(self.find_nearest)
-        self.verticalLayout_14.addLayout(self.horizontalLayout_47)
+        self.srcCatgCatlVLayout.addLayout(self.horizontalLayout_47)
         
         self.horizontalLayout_40 = QtWidgets.QHBoxLayout()
         self.horizontalLayout_40.setObjectName(_fromUtf8("horizontalLayout_40"))
-        self.verticalLayout_14.addLayout(self.horizontalLayout_40)
+        self.srcCatgCatlVLayout.addLayout(self.horizontalLayout_40)
         
+        # sky map select
         self.skymapSelectLayout = QtWidgets.QGridLayout()
         self.skymapSelectLayout.setObjectName(_fromUtf8("gridLayout_22"))
-        
+        #           category and source select
         self.checkDisplaySelect = {}
         for category in Observatory.categories:
           index = Observatory.categories.index(category)
@@ -2814,8 +2499,9 @@ class Ui_Observatory(object):
         self.cb_gp.setText(QtWidgets.QApplication.translate(
                                          "Observatory", "Galactic Plane", None))
         self.skymapSelectLayout.addWidget(self.cb_gp, 6, 1, 1, 1)
-        # end of plot display categories check boxes
+        #           end of plot display categories check boxes
         
+        #           source from other catalog section
         self.load_catalogue = QtWidgets.QPushButton(self.frame_14)
         self.load_catalogue.setEnabled(True)
         self.load_catalogue.setObjectName(_fromUtf8("load_catalogue"))
@@ -2833,8 +2519,8 @@ class Ui_Observatory(object):
                                                  "Observatory", "Source", None))
         self.skymapSelectLayout.addWidget(self.Source_label, 11, 0, 1, 2)
         
-        self.horizontalLayout_48 = QtWidgets.QHBoxLayout()
-        self.horizontalLayout_48.setObjectName(_fromUtf8("horizontalLayout_48"))
+        self.sourceRaDecHLayout = QtWidgets.QHBoxLayout()
+        self.sourceRaDecHLayout.setObjectName(_fromUtf8("sourceRaDecHLayout"))
         
         self.Dec_edit = QtWidgets.QLineEdit(self.frame_14)
         self.Dec_edit.setEnabled(True)
@@ -2842,8 +2528,8 @@ class Ui_Observatory(object):
         font.setPointSize(8)
         self.Dec_edit.setFont(font)
         self.Dec_edit.setObjectName(_fromUtf8("Dec_edit"))
-        self.horizontalLayout_48.addWidget(self.Dec_edit)
-        self.skymapSelectLayout.addLayout(self.horizontalLayout_48, 12, 0, 1, 2)
+        self.sourceRaDecHLayout.addWidget(self.Dec_edit)
+        self.skymapSelectLayout.addLayout(self.sourceRaDecHLayout, 12, 0, 1, 2)
         
         self.RA_label = QtWidgets.QLabel(self.frame_14)
         self.RA_label.setEnabled(False)
@@ -2853,7 +2539,7 @@ class Ui_Observatory(object):
         self.RA_label.setObjectName(_fromUtf8("RA_label"))
         self.RA_label.setText(QtWidgets.QApplication.translate(
                                                      "Observatory", "RA", None))
-        self.horizontalLayout_48.addWidget(self.RA_label)
+        self.sourceRaDecHLayout.addWidget(self.RA_label)
         
         self.RA_edit = QtWidgets.QLineEdit(self.frame_14)
         self.RA_edit.setEnabled(True)
@@ -2861,7 +2547,7 @@ class Ui_Observatory(object):
         font.setPointSize(8)
         self.RA_edit.setFont(font)
         self.RA_edit.setObjectName(_fromUtf8("RA_edit"))
-        self.horizontalLayout_48.addWidget(self.RA_edit)
+        self.sourceRaDecHLayout.addWidget(self.RA_edit)
         
         self.Dec_label = QtWidgets.QLabel(self.frame_14)
         self.Dec_label.setEnabled(False)
@@ -2871,20 +2557,20 @@ class Ui_Observatory(object):
         self.Dec_label.setObjectName(_fromUtf8("Dec_label"))
         self.Dec_label.setText(QtWidgets.QApplication.translate(
                                                     "Observatory", "Dec", None))
-        self.horizontalLayout_48.addWidget(self.Dec_label)
+        self.sourceRaDecHLayout.addWidget(self.Dec_label)
         
-        self.verticalLayout_14.addLayout(self.skymapSelectLayout)
+        self.srcCatgCatlVLayout.addLayout(self.skymapSelectLayout)
+        # end right column
         
-        self.gridLayout_9.addLayout(self.verticalLayout_14, 1, 0, 1, 1)
+        self.gridLayout_9.addLayout(self.srcCatgCatlVLayout, 1, 0, 1, 1)
         self.gridLayout_34.addLayout(self.gridLayout_9, 0, 0, 1, 1)
-        self.gridLayout_37.addWidget(self.frame_14, 0, 1, 2, 1)
+        self.srcTrackGLayout.addWidget(self.frame_14, 0, 1, 2, 1)
         
-        self.AzTime = QtWidgets.QWidget(self.tab)
+        self.AzTime = QtWidgets.QWidget(self.srcTrackTab)
         self.stdSizePolicyMinimum(self.AzTime)
         self.AzTime.setMinimumSize(QtCore.QSize(175, 175))
         self.AzTime.setMaximumSize(QtCore.QSize(275, 275))
         self.AzTime.setObjectName(_fromUtf8("AzTime"))
-        #self.canvas10.spectrum_Aztime(self.ui)
         self.AzTime_fig = Figure()
         self.AzTime_canvas = FigureCanvas(self.AzTime_fig)
         self.AzTime_axes = self.AzTime_fig.add_subplot(111)
@@ -2897,10 +2583,17 @@ class Ui_Observatory(object):
         self.AzTime_NTB = NavigationToolbar(self.AzTime_canvas, self.AzTime)
         self.AzTime_VBL.addWidget(self.AzTime_NTB)
 
-        self.gridLayout_37.addWidget(self.AzTime, 1, 0, 1, 1)
+        self.srcTrackGLayout.addWidget(self.AzTime, 1, 0, 1, 1)
+        # end source tracker layout
         
-        self.modeTabWidget_2.addTab(self.tab, _fromUtf8(""))
+        self.modeTabWidget_2.addTab(self.srcTrackTab, _fromUtf8(""))
+        self.modeTabWidget_2.setTabText(
+                                 self.modeTabWidget_2.indexOf(self.srcTrackTab),
+         QtWidgets.QApplication.translate("Observatory", "SourceTracker", None))
+        # end of source tracker tab
         
+        # antenna tracker tab
+        #     this is an empty tab
         self.tab_2 = QtWidgets.QWidget()
         self.tab_2.setObjectName(_fromUtf8("tab_2"))
                 
@@ -2909,9 +2602,15 @@ class Ui_Observatory(object):
             QtWidgets.QApplication.translate("Observatory",
                                              "AntennaTracker", None))
         self.CatalogTabLayout.addWidget(self.modeTabWidget_2, 0, 1, 1, 1)
+        # end of tab widget
         
         # left side of the page: sky map
         self.skymap_mpl = QtWidgets.QWidget(self.Sources)
+        palette = self.skymap_mpl.palette()
+        brush = QtGui.QBrush(QtGui.QColor(100, 255, 100))
+        brush.setStyle(QtCore.Qt.SolidPattern)
+        palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.Window, brush)
+        self.skymap_mpl.setPalette(palette)
         self.skymap_mpl.setToolTip(
             'Left click: select for Source Info\nRight click: show source name')
         self.stdSizePolicyExpanding(self.skymap_mpl)
@@ -2920,15 +2619,21 @@ class Ui_Observatory(object):
         self.skymap_mpl.setObjectName(_fromUtf8("skymap_mpl"))
         self.skymap_fig = Figure()
         self.skymap_canvas = FigureCanvas(self.skymap_fig)
-        self.skymap_axes = self.skymap_fig.add_subplot(111)
-        self.skymap_axes.set_xlim(0, 360)
-        self.skymap_axes.set_ylim(0, 90)
-        self.skymap_axes.grid(True)
+        self.skymap_axes = makeSkyMapAxes(self, self.skymap_fig, 
+                                      polar=polar_sky,
+                                      title="Source Selection", azticks=20)
         self.skymap_VBL = QtWidgets.QVBoxLayout(self.skymap_mpl)
         self.skymap_NTB = NavigationToolbar(self.skymap_canvas, self.skymap_mpl)
         self.skymap_VBL.addWidget(self.skymap_canvas)
         self.skymap_VBL.addWidget(self.skymap_NTB)       
         self.CatalogTabLayout.addWidget(self.skymap_mpl, 0, 0, 1, 1)
+        self.projectionInd = MultiHChecks(self.Sources, "projectionInd",
+                                    number=2,
+                                    enabled=[True, True],
+                                    checkable=[True, True],
+                                    label=["cartesian", "polar"],
+                        tooltip=["rectangular XY grid", "polar grid"])
+        self.CatalogTabLayout.addWidget(self.projectionInd, 1, 0, 1, 1)
         
         self.Ctrl_Tabs.addTab(self.Sources, _fromUtf8(""))
         self.Ctrl_Tabs.setTabText(self.Ctrl_Tabs.indexOf(self.Sources),
@@ -2937,6 +2642,7 @@ class Ui_Observatory(object):
         # end of Catalogues page
         
         # page for the Spectra 4Ghz-128K tab ==================================
+        
         self.roach1_ctrls = QtWidgets.QWidget()
         self.stdSizePolicyExpanding(self.roach1_ctrls)
         font = QtGui.QFont()
@@ -2945,9 +2651,10 @@ class Ui_Observatory(object):
         font.setWeight(50)
         self.roach1_ctrls.setFont(font)
         self.roach1_ctrls.setObjectName(_fromUtf8("roach1_ctrls"))
-        self.gridLayout_3 = QtWidgets.QGridLayout(self.roach1_ctrls)
         
+        self.gridLayout_3 = QtWidgets.QGridLayout(self.roach1_ctrls)
         self.gridLayout_3.setObjectName(_fromUtf8("gridLayout_3"))
+        
         self.spectra_mpl = QtWidgets.QWidget(self.roach1_ctrls)
         self.stdSizePolicyExpanding(self.spectra_mpl)
         self.spectra_mpl.setMinimumSize(QtCore.QSize(913, 530))
@@ -2959,30 +2666,19 @@ class Ui_Observatory(object):
         self.spectra_mpl.setObjectName(_fromUtf8("spectra_mpl"))
         
         self.spectra_fig = Figure()
-        self.canvas1 = FigureCanvas(self.spectra_fig)
-        #self.canvas1.spectrum_roach(self.ui)
-        self.axes1 = self.spectra_fig.add_subplot(221)
-        self.axes2 = self.spectra_fig.add_subplot(222)
-        self.axes3 = self.spectra_fig.add_subplot(223)
-        self.axes4 = self.spectra_fig.add_subplot(224)
+        self.spectraCanvas = FigureCanvas(self.spectra_fig)
+        self.spectraAxes = {}
         props = dict(boxstyle='round', facecolor='wheat', alpha=0.5)    
-        textstr1 = 'SAO64K-1'    
-        textstr2 = 'SAO64K-2'    
-        textstr3 = 'SAO64K-3'    
-        textstr4 = 'SAO64K-4'    
-        self.axes1.text(0.05, 0.95, textstr1, transform=self.axes1.transAxes,
-                        fontsize=10,verticalalignment='top', bbox=props)
-        self.axes2.text(0.05, 0.95, textstr2, transform=self.axes2.transAxes,
-                        fontsize=10,verticalalignment='top', bbox=props)
-        self.axes3.text(0.05, 0.95, textstr3, transform=self.axes3.transAxes,
-                        fontsize=10,verticalalignment='top', bbox=props)
-        self.axes4.text(0.05, 0.95, textstr4, transform=self.axes4.transAxes,
-                        fontsize=10,verticalalignment='top', bbox=props)
-        
-        self.vbl1 = QtWidgets.QVBoxLayout(self.spectra_mpl)
-        self.ntb1 = NavigationToolbar(self.canvas1, self.spectra_mpl)
-        self.vbl1.addWidget(self.canvas1)
-        self.vbl1.addWidget(self.ntb1)
+        for roach in Observatory.roachnames:
+          number = Observatory.roachnames.index(roach) + 1
+          self.spectraAxes[number] = self.spectra_fig.add_subplot(220+number)
+          self.spectraAxes[number].text(0.05, 0.95, roach, fontsize=10,
+                                verticalalignment='top', bbox=props)
+          self.spectraAxes[number].grid(True)
+        self.spectraVBL = QtWidgets.QVBoxLayout(self.spectra_mpl)
+        self.spectraNavTB = NavigationToolbar(self.spectraCanvas, self.spectra_mpl)
+        self.spectraVBL.addWidget(self.spectraCanvas)
+        self.spectraVBL.addWidget(self.spectraNavTB)
         
         
         self.gridLayout_3.addWidget(self.spectra_mpl, 0, 0, 1, 1)
@@ -3010,7 +2706,8 @@ class Ui_Observatory(object):
         self.gridLayout_2.setObjectName(_fromUtf8("gridLayout_2"))
         
         self.label_4 = QtWidgets.QLabel(self.roach1_ctrls)
-        sizePolicy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
+        sizePolicy = QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Preferred,
+                                           QtWidgets.QSizePolicy.Preferred)
         sizePolicy.setHorizontalStretch(0)
         sizePolicy.setVerticalStretch(0)
         sizePolicy.setHeightForWidth(self.label_4.sizePolicy().hasHeightForWidth())
@@ -3227,19 +2924,27 @@ class Ui_Observatory(object):
                                       "Observatory", "Spectra 4Ghz-128K", None))
                                       
         # page for the System Status
+        
         self.RfPath = QtWidgets.QWidget()
         self.RfPath.setObjectName(_fromUtf8("RfPath"))
+        palette = self.RfPath.palette()
+        brush = QtGui.QBrush(QtGui.QColor(100, 255, 255))
+        brush.setStyle(QtCore.Qt.SolidPattern)
+        palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.Window, brush)
+        self.RfPath.setPalette(palette)
         
-        self.gridLayout_41 = QtWidgets.QGridLayout(self.RfPath)
-        self.gridLayout_41.setObjectName(_fromUtf8("gridLayout_41"))
+        self.sysStatPageGLayout = QtWidgets.QGridLayout(self.RfPath)
+        self.sysStatPageGLayout.setObjectName(_fromUtf8("sysStatPageGLayout"))
         
-        self.gridLayout_25 = QtWidgets.QGridLayout()
-        self.gridLayout_25.setObjectName(_fromUtf8("gridLayout_25"))
-        
-        self.verticalLayout_18 = QtWidgets.QVBoxLayout()
-        self.verticalLayout_18.setObjectName(_fromUtf8("verticalLayout_18"))
-        
+        # minical plots
+        self.minicalPlotVLayout = QtWidgets.QVBoxLayout()
+        self.minicalPlotVLayout.setObjectName(_fromUtf8("minicalPlotVLayout"))
         self.minical_mpl = QtWidgets.QWidget(self.RfPath)
+        palette = self.minical_mpl.palette()
+        brush = QtGui.QBrush(QtGui.QColor(255, 150, 255))
+        brush.setStyle(QtCore.Qt.SolidPattern)
+        palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.Window, brush)
+        self.minical_mpl.setPalette(palette)
         self.stdSizePolicyExpanding(self.minical_mpl)
         self.minical_mpl.setMinimumSize(QtCore.QSize(450, 250))
         self.minical_mpl.setMaximumSize(QtCore.QSize(800, 800))
@@ -3257,43 +2962,46 @@ class Ui_Observatory(object):
         self.minical_VLB.addWidget(self.minical_canvas)
         self.minical_NTB = NavigationToolbar(self.minical_canvas, self.minical_mpl)
         self.minical_VLB.addWidget(self.minical_NTB)
-        self.verticalLayout_18.addWidget(self.minical_mpl)
+        self.minicalPlotVLayout.addWidget(self.minical_mpl)
         
-        self.horizontalLayout_51 = QtWidgets.QHBoxLayout()
-        self.horizontalLayout_51.setObjectName(_fromUtf8("horizontalLayout_51"))
+        self.sysStatPageGLayout.addLayout(self.minicalPlotVLayout, 0, 0, 1, 1)
         
-        spacerItem9 = QtWidgets.QSpacerItem(40, 20,
-                                            QtWidgets.QSizePolicy.Expanding,
-                                            QtWidgets.QSizePolicy.Minimum)
-        self.horizontalLayout_51.addItem(spacerItem9)
-        
-        self.verticalLayout_18.addLayout(self.horizontalLayout_51)
-        
-        self.gridLayout_25.addLayout(self.verticalLayout_18, 0, 0, 1, 1)
-        
+        # status info column
         self.gridLayout_43 = QtWidgets.QGridLayout()
         self.gridLayout_43.setObjectName(_fromUtf8("gridLayout_43"))
         
         self.gridLayout_23 = QtWidgets.QGridLayout()
         self.gridLayout_23.setObjectName(_fromUtf8("gridLayout_23"))
-        
-        self.verticalLayout_13 = QtWidgets.QVBoxLayout()
-        self.verticalLayout_13.setObjectName(_fromUtf8("verticalLayout_13"))
+                
+        self.FEstatusLabel = QtWidgets.QLabel(self.RfPath)
+        self.FEstatusLabel.setObjectName(_fromUtf8("FEstatusLabel"))
+        self.FEstatusLabel.setText(QtWidgets.QApplication.translate(
+                                        "Observatory", "Frontend status", None))
+        self.gridLayout_23.addWidget(self.FEstatusLabel, 1, 0, 1, 1)
+
+        self.NDweatherVLayout = QtWidgets.QVBoxLayout()
+        self.NDweatherVLayout.setObjectName(_fromUtf8("NDweatherVLayout"))
         
         self.horizontalLayout_26 = QtWidgets.QHBoxLayout()
         self.horizontalLayout_26.setObjectName(_fromUtf8("horizontalLayout_26"))
         
-        self.frame_9 = QtWidgets.QFrame(self.RfPath)
+        # noise diode modulation frame
+        self.NDmodFRame = QtWidgets.QFrame(self.RfPath)
+        palette = self.NDmodFRame.palette()
+        brush = QtGui.QBrush(QtGui.QColor(255, 255, 100))
+        brush.setStyle(QtCore.Qt.SolidPattern)
+        palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.Window, brush)
+        self.NDmodFRame.setPalette(palette)
         
-        self.stdSizePolicyExpanding(self.frame_9)
+        self.stdSizePolicyExpanding(self.NDmodFRame)
         font = QtGui.QFont()
         font.setPointSize(9)
-        self.frame_9.setFont(font)
-        self.frame_9.setFrameShape(QtWidgets.QFrame.StyledPanel)
-        self.frame_9.setFrameShadow(QtWidgets.QFrame.Raised)
-        self.frame_9.setObjectName(_fromUtf8("frame_9"))
+        self.NDmodFRame.setFont(font)
+        self.NDmodFRame.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        self.NDmodFRame.setFrameShadow(QtWidgets.QFrame.Raised)
+        self.NDmodFRame.setObjectName(_fromUtf8("NDmodFRame"))
         
-        self.gridLayout_11 = QtWidgets.QGridLayout(self.frame_9)
+        self.gridLayout_11 = QtWidgets.QGridLayout(self.NDmodFRame)
         self.gridLayout_11.setObjectName(_fromUtf8("gridLayout_11"))
         
         self.verticalLayout_9 = QtWidgets.QVBoxLayout()
@@ -3302,7 +3010,7 @@ class Ui_Observatory(object):
         self.horizontalLayout_17 = QtWidgets.QHBoxLayout()
         self.horizontalLayout_17.setObjectName(_fromUtf8("horizontalLayout_17"))
         
-        self.noiseLevelSpinBox = QtWidgets.QDoubleSpinBox(self.frame_9)
+        self.noiseLevelSpinBox = QtWidgets.QDoubleSpinBox(self.NDmodFRame)
         self.noiseLevelSpinBox.setEnabled(False)
         self.noiseLevelSpinBox.setMaximum(350.0)
         self.noiseLevelSpinBox.setSingleStep(5.0)
@@ -3310,263 +3018,295 @@ class Ui_Observatory(object):
         self.noiseLevelSpinBox.setObjectName(_fromUtf8("noiseLevelSpinBox"))
         self.horizontalLayout_17.addWidget(self.noiseLevelSpinBox)
         
-        self.NDtempLabel = QtWidgets.QLabel(self.frame_9)
+        self.NDtempLabel = QtWidgets.QLabel(self.NDmodFRame)
         self.NDtempLabel.setObjectName(_fromUtf8("NDtempLabel"))
         self.horizontalLayout_17.addWidget(self.NDtempLabel)
         
         self.verticalLayout_9.addLayout(self.horizontalLayout_17)
         
-        self.checkNoise = QtWidgets.QCheckBox(self.frame_9)
+        self.checkNoise = QtWidgets.QCheckBox(self.NDmodFRame)
         self.checkNoise.setObjectName(_fromUtf8("checkNoise"))
+        self.checkNoise.setText(QtWidgets.QApplication.translate(
+                                            "Observatory", "Noise Diode", None))
         self.verticalLayout_9.addWidget(self.checkNoise)
         
-        self.horizontalLayout_5 = QtWidgets.QHBoxLayout()
-        self.horizontalLayout_5.setObjectName(_fromUtf8("horizontalLayout_5"))
-        self.nd_mod_pb = QtWidgets.QPushButton(self.frame_9)
+        self.NDmodHLayout = QtWidgets.QHBoxLayout()
+        self.NDmodHLayout.setObjectName(_fromUtf8("NDmodHLayout"))
+        self.nd_mod_pb = QtWidgets.QPushButton(self.NDmodFRame)
         self.nd_mod_pb.setCheckable(True)
         self.nd_mod_pb.setObjectName(_fromUtf8("nd_mod_pb"))
-        self.horizontalLayout_5.addWidget(self.nd_mod_pb)
+        self.NDmodHLayout.addWidget(self.nd_mod_pb)
         
-        self.label_19 = QtWidgets.QLabel(self.frame_9)
-        self.label_19.setObjectName(_fromUtf8("label_19"))
-        self.label_19.setText(QtWidgets.QApplication.translate("Observatory",
+        self.NDmodRateLabel = QtWidgets.QLabel(self.NDmodFRame)
+        self.NDmodRateLabel.setObjectName(_fromUtf8("NDmodRateLabel"))
+        self.NDmodRateLabel.setText(QtWidgets.QApplication.translate("Observatory",
                                                        "ND mod rate(Hz)", None))
-        self.horizontalLayout_5.addWidget(self.label_19)
+        self.NDmodHLayout.addWidget(self.NDmodRateLabel)
         
-        self.ndmod = QtWidgets.QSpinBox(self.frame_9)
+        self.ndmod = QtWidgets.QSpinBox(self.NDmodFRame)
         self.ndmod.setEnabled(False)
         self.ndmod.setMinimum(1)
         self.ndmod.setMaximum(6)
         self.ndmod.setSingleStep(1)
         self.ndmod.setProperty("value", 4)
         self.ndmod.setObjectName(_fromUtf8("ndmod"))
-        self.horizontalLayout_5.addWidget(self.ndmod)
+        self.NDmodHLayout.addWidget(self.ndmod)
         
-        self.verticalLayout_9.addLayout(self.horizontalLayout_5)
+        self.verticalLayout_9.addLayout(self.NDmodHLayout)
         self.gridLayout_11.addLayout(self.verticalLayout_9, 1, 1, 1, 1)
         
-        self.label_27 = QtWidgets.QLabel(self.frame_9)
+        self.label_27 = QtWidgets.QLabel(self.NDmodFRame)
         self.label_27.setObjectName(_fromUtf8("label_27"))
         self.label_27.setText(QtWidgets.QApplication.translate(
                                  "Observatory", "Noise Diode Modulation", None))
         self.gridLayout_11.addWidget(self.label_27, 0, 1, 1, 1)
         
-        spacerItem10 = QtWidgets.QSpacerItem(40, 20,
-                                             QtWidgets.QSizePolicy.Expanding,
-                                             QtWidgets.QSizePolicy.Minimum)
-        self.gridLayout_11.addItem(spacerItem10, 1, 2, 1, 1)
+        #spacerItem10 = QtWidgets.QSpacerItem(40, 20,
+        #                                     QtWidgets.QSizePolicy.Expanding,
+        #                                     QtWidgets.QSizePolicy.Minimum)
+        #self.gridLayout_11.addItem(spacerItem10, 1, 2, 1, 1)
         
-        self.horizontalLayout_26.addWidget(self.frame_9)
-        self.verticalLayout_13.addLayout(self.horizontalLayout_26)
-        
-        spacerItem11 = QtWidgets.QSpacerItem(40, 20,
-                                             QtWidgets.QSizePolicy.Expanding,
-                                             QtWidgets.QSizePolicy.Minimum)
-        self.verticalLayout_13.addItem(spacerItem11)
-        
-        self.horizontalLayout_6 = QtWidgets.QHBoxLayout()
-        self.horizontalLayout_6.setObjectName(_fromUtf8("horizontalLayout_6"))
+        self.horizontalLayout_26.addWidget(self.NDmodFRame)
+        self.NDweatherVLayout.addLayout(self.horizontalLayout_26)
+        # end ND mod frame
+                
+        # phase cal layout
+        self.phaseCalHLayout = QtWidgets.QHBoxLayout()
+        self.phaseCalHLayout.setObjectName(_fromUtf8("phaseCalHLayout"))
         
         self.phaseCalcheckBox = QtWidgets.QCheckBox(self.RfPath)
         self.phaseCalcheckBox.setObjectName(_fromUtf8("phaseCalcheckBox"))
         self.phaseCalcheckBox.setText(
              QtWidgets.QApplication.translate("Observatory", "Phase Cal", None))
-        self.horizontalLayout_6.addWidget(self.phaseCalcheckBox)
+        self.phaseCalHLayout.addWidget(self.phaseCalcheckBox)
         
         self.RadioButton1MHz = QtWidgets.QRadioButton(self.RfPath)
         self.RadioButton1MHz.setChecked(True)
         self.RadioButton1MHz.setObjectName(_fromUtf8("RadioButton1MHz"))
         self.RadioButton1MHz.setText(
                  QtWidgets.QApplication.translate("Observatory", "1 MHz", None))
-        self.horizontalLayout_6.addWidget(self.RadioButton1MHz)
+        self.phaseCalHLayout.addWidget(self.RadioButton1MHz)
         
         self.RadioButton5MHz = QtWidgets.QRadioButton(self.RfPath)
         self.RadioButton5MHz.setObjectName(_fromUtf8("RadioButton5MHz"))
         self.RadioButton5MHz.setText(
                  QtWidgets.QApplication.translate("Observatory", "5 MHz", None))
-        self.horizontalLayout_6.addWidget(self.RadioButton5MHz)
+        self.phaseCalHLayout.addWidget(self.RadioButton5MHz)
         
-        self.verticalLayout_13.addLayout(self.horizontalLayout_6)
+        self.NDweatherVLayout.addLayout(self.phaseCalHLayout)
+        # end phase cal layout
         
-        self.frame_8 = QtWidgets.QFrame(self.RfPath)
-        self.frame_8.setFrameShape(QtWidgets.QFrame.StyledPanel)
-        self.frame_8.setFrameShadow(QtWidgets.QFrame.Raised)
-        self.frame_8.setObjectName(_fromUtf8("frame_8"))
+        # weather frame
+        self.weatherFrame = QtWidgets.QFrame(self.RfPath)
+        self.weatherFrame.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        self.weatherFrame.setFrameShadow(QtWidgets.QFrame.Raised)
+        self.weatherFrame.setObjectName(_fromUtf8("weatherFrame"))
         
-        self.horizontalLayout_25 = QtWidgets.QHBoxLayout(self.frame_8)
-        self.horizontalLayout_25.setObjectName(_fromUtf8("horizontalLayout_25"))
+        self.weatherHLayout = QtWidgets.QHBoxLayout(self.weatherFrame)
+        self.weatherHLayout.setObjectName(_fromUtf8("weatherHLayout"))
         
-        self.verticalLayout_24 = QtWidgets.QVBoxLayout()
-        self.verticalLayout_24.setObjectName(_fromUtf8("verticalLayout_24"))
+        self.weatherParsVLayout = QtWidgets.QVBoxLayout()
+        self.weatherParsVLayout.setObjectName(_fromUtf8("weatherParsVLayout"))
         
-        self.horizontalLayout_19 = QtWidgets.QHBoxLayout()
-        self.horizontalLayout_19.setObjectName(_fromUtf8("horizontalLayout_19"))
+        # temperature
+        self.tempHLayout = QtWidgets.QHBoxLayout()
+        self.tempHLayout.setObjectName(_fromUtf8("tempHLayout"))
         
-        self.label_46 = QtWidgets.QLabel(self.frame_8)
+        self.tempLabel = QtWidgets.QLabel(self.weatherFrame)
         font = QtGui.QFont()
         font.setPointSize(8)
-        self.label_46.setFont(font)
-        self.label_46.setObjectName(_fromUtf8("label_46"))
-        self.label_46.setText(QtWidgets.QApplication.translate(
+        self.tempLabel.setFont(font)
+        self.tempLabel.setObjectName(_fromUtf8("tempLabel"))
+        self.tempLabel.setText(QtWidgets.QApplication.translate(
                                                    "Observatory", "Temp", None))
-        self.horizontalLayout_19.addWidget(self.label_46)
+        self.tempHLayout.addWidget(self.tempLabel)
         
-        self.temp = QtWidgets.QLabel(self.frame_8)
+        self.temp = QtWidgets.QLabel(self.weatherFrame)
         font = QtGui.QFont()
         font.setPointSize(8)
         self.temp.setFont(font)
         self.temp.setObjectName(_fromUtf8("temp"))
-        self.temp.setText(QtWidgets.QApplication.translate("Observatory", "0", None))
-        self.horizontalLayout_19.addWidget(self.temp)
+        self.temp.setText(QtWidgets.QApplication.translate(
+                                                      "Observatory", "0", None))
+        self.tempHLayout.addWidget(self.temp)
+        self.weatherParsVLayout.addLayout(self.tempHLayout)
         
-        self.verticalLayout_24.addLayout(self.horizontalLayout_19)
+        # pressure
+        self.pressureHLayout = QtWidgets.QHBoxLayout()
+        self.pressureHLayout.setObjectName(_fromUtf8("pressureHLayout"))
         
-        self.horizontalLayout_12 = QtWidgets.QHBoxLayout()
-        self.horizontalLayout_12.setObjectName(_fromUtf8("horizontalLayout_12"))
-        
-        self.label_45 = QtWidgets.QLabel(self.frame_8)
+        self.pressureLabel = QtWidgets.QLabel(self.weatherFrame)
         font = QtGui.QFont()
         font.setPointSize(8)
-        self.label_45.setFont(font)
-        self.label_45.setObjectName(_fromUtf8("label_45"))
-        self.label_45.setText(QtWidgets.QApplication.translate(
+        self.pressureLabel.setFont(font)
+        self.pressureLabel.setObjectName(_fromUtf8("pressureLabel"))
+        self.pressureLabel.setText(QtWidgets.QApplication.translate(
                                                "Observatory", "Pressure", None))
-        self.horizontalLayout_12.addWidget(self.label_45)
+        self.pressureHLayout.addWidget(self.pressureLabel)
         
-        self.pressure = QtWidgets.QLabel(self.frame_8)
+        self.pressure = QtWidgets.QLabel(self.weatherFrame)
         font = QtGui.QFont()
         font.setPointSize(8)
         self.pressure.setFont(font)
         self.pressure.setObjectName(_fromUtf8("pressure"))
         self.pressure.setText(QtWidgets.QApplication.translate(
                                                       "Observatory", "0", None))
-        self.horizontalLayout_12.addWidget(self.pressure)
+        self.pressureHLayout.addWidget(self.pressure)
+        self.weatherParsVLayout.addLayout(self.pressureHLayout)
         
-        self.verticalLayout_24.addLayout(self.horizontalLayout_12)
+        # humidity
+        self.humidityHLayout = QtWidgets.QHBoxLayout()
+        self.humidityHLayout.setObjectName(_fromUtf8("humidityHLayout"))
         
-        self.horizontalLayout_22 = QtWidgets.QHBoxLayout()
-        self.horizontalLayout_22.setObjectName(_fromUtf8("horizontalLayout_22"))
-        
-        self.label_43 = QtWidgets.QLabel(self.frame_8)
+        self.humidityLabel = QtWidgets.QLabel(self.weatherFrame)
         font = QtGui.QFont()
         font.setPointSize(8)
-        self.label_43.setFont(font)
-        self.label_43.setObjectName(_fromUtf8("label_43"))
-        self.label_43.setText(QtWidgets.QApplication.translate(
+        self.humidityLabel.setFont(font)
+        self.humidityLabel.setObjectName(_fromUtf8("humidityLabel"))
+        self.humidityLabel.setText(QtWidgets.QApplication.translate(
                                                "Observatory", "Humidity", None))
-        self.horizontalLayout_22.addWidget(self.label_43)
+        self.humidityHLayout.addWidget(self.humidityLabel)
         
-        self.humidity = QtWidgets.QLabel(self.frame_8)
+        self.humidity = QtWidgets.QLabel(self.weatherFrame)
         font = QtGui.QFont()
         font.setPointSize(8)
         self.humidity.setFont(font)
         self.humidity.setObjectName(_fromUtf8("humidity"))
         self.humidity.setText(QtWidgets.QApplication.translate(
                                                       "Observatory", "0", None))
-        self.horizontalLayout_22.addWidget(self.humidity)
+        self.humidityHLayout.addWidget(self.humidity)
+        self.weatherParsVLayout.addLayout(self.humidityHLayout)
         
-        self.verticalLayout_24.addLayout(self.horizontalLayout_22)
+        # windspeed
+        self.windspeedHLayout = QtWidgets.QHBoxLayout()
+        self.windspeedHLayout.setObjectName(_fromUtf8("windspeedHLayout"))
         
-        self.horizontalLayout_23 = QtWidgets.QHBoxLayout()
-        self.horizontalLayout_23.setObjectName(_fromUtf8("horizontalLayout_23"))
-        
-        self.label_53 = QtWidgets.QLabel(self.frame_8)
+        self.windspeedLabel = QtWidgets.QLabel(self.weatherFrame)
         font = QtGui.QFont()
         font.setPointSize(8)
-        self.label_53.setFont(font)
-        self.label_53.setObjectName(_fromUtf8("label_53"))
-        self.label_53.setText(QtWidgets.QApplication.translate(
+        self.windspeedLabel.setFont(font)
+        self.windspeedLabel.setObjectName(_fromUtf8("windspeedLabel"))
+        self.windspeedLabel.setText(QtWidgets.QApplication.translate(
                                              "Observatory", "Wind speed", None))
-        self.horizontalLayout_23.addWidget(self.label_53)
+        self.windspeedHLayout.addWidget(self.windspeedLabel)
         
-        self.windspeed = QtWidgets.QLabel(self.frame_8)
+        self.windspeed = QtWidgets.QLabel(self.weatherFrame)
         font = QtGui.QFont()
         font.setPointSize(8)
         self.windspeed.setFont(font)
         self.windspeed.setObjectName(_fromUtf8("windspeed"))
         self.windspeed.setText(QtWidgets.QApplication.translate(
                                                       "Observatory", "0", None))
-        self.horizontalLayout_23.addWidget(self.windspeed)
+        self.windspeedHLayout.addWidget(self.windspeed)
+        self.weatherParsVLayout.addLayout(self.windspeedHLayout)
         
-        self.verticalLayout_24.addLayout(self.horizontalLayout_23)
-        self.horizontalLayout_24 = QtWidgets.QHBoxLayout()
-        self.horizontalLayout_24.setObjectName(_fromUtf8("horizontalLayout_24"))
+        # wind direction
+        self.windDirHLayout = QtWidgets.QHBoxLayout()
+        self.windDirHLayout.setObjectName(_fromUtf8("windDirHLayout"))
         
-        self.label_57 = QtWidgets.QLabel(self.frame_8)
+        self.windDirLabel = QtWidgets.QLabel(self.weatherFrame)
         font = QtGui.QFont()
         font.setPointSize(8)
-        self.label_57.setFont(font)
-        self.label_57.setObjectName(_fromUtf8("label_57"))
-        self.label_57.setText(QtWidgets.QApplication.translate(
+        self.windDirLabel.setFont(font)
+        self.windDirLabel.setObjectName(_fromUtf8("windDirLabel"))
+        self.windDirLabel.setText(QtWidgets.QApplication.translate(
                                          "Observatory", "Wind direction", None))
-        self.horizontalLayout_24.addWidget(self.label_57)
+        self.windDirHLayout.addWidget(self.windDirLabel)
         
-        self.winddir = QtWidgets.QLabel(self.frame_8)
+        self.winddir = QtWidgets.QLabel(self.weatherFrame)
         font = QtGui.QFont()
         font.setPointSize(8)
         self.winddir.setFont(font)
         self.winddir.setObjectName(_fromUtf8("winddir"))
         self.winddir.setText(QtWidgets.QApplication.translate(
                                                       "Observatory", "0", None))
-        self.horizontalLayout_24.addWidget(self.winddir)
+        self.windDirHLayout.addWidget(self.winddir)
+        self.weatherParsVLayout.addLayout(self.windDirHLayout)
         
-        self.verticalLayout_24.addLayout(self.horizontalLayout_24)
+        # precipitation
+        self.precipHLayout = QtWidgets.QHBoxLayout()
+        self.precipHLayout.setObjectName(_fromUtf8("precipHLayout"))
         
-        self.horizontalLayout_49 = QtWidgets.QHBoxLayout()
-        self.horizontalLayout_49.setObjectName(_fromUtf8("horizontalLayout_49"))
-        
-        self.label_64 = QtWidgets.QLabel(self.frame_8)
+        self.precipLabel = QtWidgets.QLabel(self.weatherFrame)
         font = QtGui.QFont()
         font.setPointSize(8)
-        self.label_64.setFont(font)
-        self.label_64.setObjectName(_fromUtf8("label_64"))
-        self.label_64.setText(QtWidgets.QApplication.translate(
+        self.precipLabel.setFont(font)
+        self.precipLabel.setObjectName(_fromUtf8("precipLabel"))
+        self.precipLabel.setText(QtWidgets.QApplication.translate(
                                           "Observatory", "Precipitation", None))
-        self.horizontalLayout_49.addWidget(self.label_64)
+        self.precipHLayout.addWidget(self.precipLabel)
         
-        self.precip = QtWidgets.QLabel(self.frame_8)
+        self.precip = QtWidgets.QLabel(self.weatherFrame)
         font = QtGui.QFont()
         font.setPointSize(8)
         self.precip.setFont(font)
         self.precip.setObjectName(_fromUtf8("precip"))
         self.precip.setText(QtWidgets.QApplication.translate(
                                                       "Observatory", "0", None))
-        self.horizontalLayout_49.addWidget(self.precip)
+        self.precipHLayout.addWidget(self.precip)
+        self.weatherParsVLayout.addLayout(self.precipHLayout)
+        # end precip
         
-        self.verticalLayout_24.addLayout(self.horizontalLayout_49)
+        self.weatherHLayout.addLayout(self.weatherParsVLayout)
         
-        self.horizontalLayout_25.addLayout(self.verticalLayout_24)
+        self.emptyWeatherFrame = QtWidgets.QFrame(self.weatherFrame)
+        self.emptyWeatherFrame.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        self.emptyWeatherFrame.setFrameShadow(QtWidgets.QFrame.Raised)
+        self.emptyWeatherFrame.setObjectName(_fromUtf8("emptyWeatherFrame"))
+        self.weatherHLayout.addWidget(self.emptyWeatherFrame)
         
-        self.frame_18 = QtWidgets.QFrame(self.frame_8)
-        self.frame_18.setFrameShape(QtWidgets.QFrame.StyledPanel)
-        self.frame_18.setFrameShadow(QtWidgets.QFrame.Raised)
-        self.frame_18.setObjectName(_fromUtf8("frame_18"))
-        self.horizontalLayout_25.addWidget(self.frame_18)
+        self.NDweatherVLayout.addWidget(self.weatherFrame)
+        self.gridLayout_23.addLayout(self.NDweatherVLayout, 3, 0, 1, 1)
+        # end weather frame
         
-        self.verticalLayout_13.addWidget(self.frame_8)
-        self.gridLayout_23.addLayout(self.verticalLayout_13, 3, 0, 1, 1)
+        # front end temperatures layout
+        self.feTempGLayout = QtWidgets.QGridLayout()
+        self.feTempGLayout.setObjectName(_fromUtf8("feTempGLayout"))
         
-        self.horizontalLayout_7 = QtWidgets.QHBoxLayout()
-        self.horizontalLayout_7.setObjectName(_fromUtf8("horizontalLayout_7"))
+        # load temps
+        self.loadTempHLayout = QtWidgets.QHBoxLayout()
+        self.loadTempHLayout.setObjectName(_fromUtf8("loadTempHLayout"))
         
-        self.label_21 = QtWidgets.QLabel(self.RfPath)
-        self.label_21.setObjectName(_fromUtf8("label_21"))
-        self.label_21.setText(QtWidgets.QApplication.translate(
-                                        "Observatory", "Frontend status", None))
-        self.horizontalLayout_7.addWidget(self.label_21)
-         
-        spacerItem12 = QtWidgets.QSpacerItem(40, 20,
-                                             QtWidgets.QSizePolicy.Expanding,
-                                             QtWidgets.QSizePolicy.Minimum)
-        self.horizontalLayout_7.addItem(spacerItem12)
+        self.load1tempLabel = QtWidgets.QLabel(self.RfPath)
+        self.load1tempLabel.setAlignment(QtCore.Qt.AlignRight|QtCore.Qt.AlignTrailing|
+                                   QtCore.Qt.AlignVCenter)
+        self.load1tempLabel.setObjectName(_fromUtf8("load1tempLabel"))
+        self.load1tempLabel.setText(QtWidgets.QApplication.translate(
+                                             "Observatory", "load 1", None))
+        self.loadTempHLayout.addWidget(self.load1tempLabel)
         
-        self.gridLayout_23.addLayout(self.horizontalLayout_7, 1, 0, 1, 1)
+        self.lcdLoad1 = QtWidgets.QLCDNumber(self.RfPath)
+        self.lcdLoad1.setEnabled(True)
+        palette = load1Palette()
+        self.lcdLoad1.setPalette(palette)
+        self.lcdLoad1.setAutoFillBackground(True)
+        self.lcdLoad1.setProperty("value", 0.0)
+        self.lcdLoad1.setObjectName(_fromUtf8("lcdLoad1"))
+        self.loadTempHLayout.addWidget(self.lcdLoad1)
         
-        self.gridLayout_29 = QtWidgets.QGridLayout()
-        self.gridLayout_29.setObjectName(_fromUtf8("gridLayout_29"))
+        self.lcdLoad2 = QtWidgets.QLCDNumber(self.RfPath)
+        self.lcdLoad2.setEnabled(True)
+        palette = load2Palette()
+        self.lcdLoad2.setPalette(palette)
+        self.lcdLoad2.setAutoFillBackground(True)
+        self.lcdLoad2.setObjectName(_fromUtf8("lcdLoad2"))
+        self.lcdLoad2.setProperty("value", 0.0)
+        self.loadTempHLayout.addWidget(self.lcdLoad2)
         
-        self.horizontalLayout_15 = QtWidgets.QHBoxLayout()
-        self.horizontalLayout_15.setObjectName(_fromUtf8("horizontalLayout_15"))
+        self.load2tempLabel = QtWidgets.QLabel(self.RfPath)
+        self.load2tempLabel.setAlignment(
+                                     QtCore.Qt.AlignLeading|QtCore.Qt.AlignLeft|
+                                   QtCore.Qt.AlignVCenter)
+        self.load2tempLabel.setObjectName(_fromUtf8("load2tempLabel"))
+        self.load2tempLabel.setText(QtWidgets.QApplication.translate(
+                                             "Observatory", "load 2", None))
+        self.loadTempHLayout.addWidget(self.load2tempLabel)
+        self.feTempGLayout.addLayout(self.loadTempHLayout, 0, 0, 1, 1)
+        # end load temps
+        
+        # cryotemps
+        self.cryTempHLayout = QtWidgets.QHBoxLayout()
+        self.cryTempHLayout.setObjectName(_fromUtf8("cryTempHLayout"))
         
         self.label70K = QtWidgets.QLabel(self.RfPath)
         self.label70K.setAlignment(QtCore.Qt.AlignRight|QtCore.Qt.AlignTrailing|
@@ -3574,25 +3314,25 @@ class Ui_Observatory(object):
         self.label70K.setObjectName(_fromUtf8("label70K"))
         self.label70K.setText(QtWidgets.QApplication.translate(
                                              "Observatory", "70 K stage", None))
-        self.horizontalLayout_15.addWidget(self.label70K)
+        self.cryTempHLayout.addWidget(self.label70K)
         
         self.lcd70K = QtWidgets.QLCDNumber(self.RfPath)
         self.lcd70K.setEnabled(True)
-        palette = self.palette70K()
+        palette = palette70K()
         self.lcd70K.setPalette(palette)
         self.lcd70K.setAutoFillBackground(True)
         self.lcd70K.setObjectName(_fromUtf8("lcd70K"))
         self.lcd70K.setProperty("value", 0.0)
-        self.horizontalLayout_15.addWidget(self.lcd70K)
+        self.cryTempHLayout.addWidget(self.lcd70K)
         
         self.lcd12K = QtWidgets.QLCDNumber(self.RfPath)
         self.lcd12K.setEnabled(True)
-        palette = self.palette12K()
+        palette = palette12K()
         self.lcd12K.setPalette(palette)
         self.lcd12K.setAutoFillBackground(True)
         self.lcd12K.setObjectName(_fromUtf8("lcd12K"))
         self.lcd12K.setProperty("value", 0.0)
-        self.horizontalLayout_15.addWidget(self.lcd12K)
+        self.cryTempHLayout.addWidget(self.lcd12K)
         
         self.label12K = QtWidgets.QLabel(self.RfPath)
         self.label12K.setAlignment(QtCore.Qt.AlignLeading|QtCore.Qt.AlignLeft|
@@ -3600,33 +3340,12 @@ class Ui_Observatory(object):
         self.label12K.setObjectName(_fromUtf8("label12K"))
         self.label12K.setText(QtWidgets.QApplication.translate(
                                              "Observatory", "12 K stage", None))
-        self.horizontalLayout_15.addWidget(self.label12K)
+        self.cryTempHLayout.addWidget(self.label12K)
+        self.feTempGLayout.addLayout(self.cryTempHLayout, 1, 0, 1, 1)
+        # end cry temps
         
-        self.gridLayout_29.addLayout(self.horizontalLayout_15, 1, 0, 1, 1)
+        self.gridLayout_23.addLayout(self.feTempGLayout, 2, 0, 1, 1)
         
-        self.horizontalLayout_2 = QtWidgets.QHBoxLayout()
-        self.horizontalLayout_2.setObjectName(_fromUtf8("horizontalLayout_2"))
-        
-        self.lcdLoad1 = QtWidgets.QLCDNumber(self.RfPath)
-        self.lcdLoad1.setEnabled(True)
-        palette = self.load1Palette()
-        self.lcdLoad1.setPalette(palette)
-        self.lcdLoad1.setAutoFillBackground(True)
-        self.lcdLoad1.setProperty("value", 0.0)
-        self.lcdLoad1.setObjectName(_fromUtf8("lcdLoad1"))
-        self.horizontalLayout_2.addWidget(self.lcdLoad1)
-        
-        self.lcdLoad2 = QtWidgets.QLCDNumber(self.RfPath)
-        self.lcdLoad2.setEnabled(True)
-        palette = self.load2Palette()
-        self.lcdLoad2.setPalette(palette)
-        self.lcdLoad2.setAutoFillBackground(True)
-        self.lcdLoad2.setObjectName(_fromUtf8("lcdLoad2"))
-        self.lcdLoad2.setProperty("value", 0.0)
-
-        self.horizontalLayout_2.addWidget(self.lcdLoad2)
-        self.gridLayout_29.addLayout(self.horizontalLayout_2, 0, 0, 1, 1)
-        self.gridLayout_23.addLayout(self.gridLayout_29, 2, 0, 1, 1)
         self.gridLayout_43.addLayout(self.gridLayout_23, 0, 0, 1, 2)
         
         self.minical = QtWidgets.QPushButton(self.RfPath)
@@ -3646,120 +3365,157 @@ class Ui_Observatory(object):
         self.frame_17.setObjectName(_fromUtf8("frame_17"))
         self.gridLayout_42 = QtWidgets.QGridLayout(self.frame_17)
         self.gridLayout_42.setObjectName(_fromUtf8("gridLayout_42"))
-        self.g2 = QtWidgets.QLabel(self.frame_17)
-        self.g2.setObjectName(_fromUtf8("g2"))
-        self.gridLayout_42.addWidget(self.g2, 2, 5, 1, 1)
-        self.ft4 = QtWidgets.QLabel(self.frame_17)
-        self.ft4.setObjectName(_fromUtf8("ft4"))
-        self.gridLayout_42.addWidget(self.ft4, 4, 3, 1, 1)
-        self.label_38 = QtWidgets.QLabel(self.frame_17)
-        self.label_38.setObjectName(_fromUtf8("label_38"))
-        self.gridLayout_42.addWidget(self.label_38, 2, 0, 1, 1)
-        self.label_34 = QtWidgets.QLabel(self.frame_17)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.label_34.setFont(font)
-        self.label_34.setObjectName(_fromUtf8("label_34"))
-        self.gridLayout_42.addWidget(self.label_34, 0, 3, 1, 1)
-        self.g1 = QtWidgets.QLabel(self.frame_17)
-        self.g1.setObjectName(_fromUtf8("g1"))
-        self.gridLayout_42.addWidget(self.g1, 1, 5, 1, 1)
+        
         self.label_35 = QtWidgets.QLabel(self.frame_17)
         font = QtGui.QFont()
         font.setPointSize(8)
         self.label_35.setFont(font)
         self.label_35.setObjectName(_fromUtf8("label_35"))
+        self.label_35.setText(QtWidgets.QApplication.translate(
+                                                  "Observatory", "Roach", None))
         self.gridLayout_42.addWidget(self.label_35, 0, 0, 1, 1)
-        self.at2 = QtWidgets.QLabel(self.frame_17)
-        self.at2.setObjectName(_fromUtf8("at2"))
-        self.gridLayout_42.addWidget(self.at2, 2, 2, 1, 1)
-        self.at4 = QtWidgets.QLabel(self.frame_17)
-        self.at4.setObjectName(_fromUtf8("at4"))
-        self.gridLayout_42.addWidget(self.at4, 4, 2, 1, 1)
-        self.ft2 = QtWidgets.QLabel(self.frame_17)
-        self.ft2.setObjectName(_fromUtf8("ft2"))
-        self.gridLayout_42.addWidget(self.ft2, 2, 3, 1, 1)
+        
         self.label_36 = QtWidgets.QLabel(self.frame_17)
         font = QtGui.QFont()
         font.setPointSize(8)
         self.label_36.setFont(font)
         self.label_36.setObjectName(_fromUtf8("label_36"))
         self.gridLayout_42.addWidget(self.label_36, 0, 5, 1, 1)
-        self.label_37 = QtWidgets.QLabel(self.frame_17)
-        self.label_37.setObjectName(_fromUtf8("label_37"))
-        self.gridLayout_42.addWidget(self.label_37, 1, 0, 1, 1)
-        self.adt1 = QtWidgets.QLabel(self.frame_17)
-        self.adt1.setObjectName(_fromUtf8("adt1"))
-        self.gridLayout_42.addWidget(self.adt1, 1, 4, 1, 1)
-        self.adt2 = QtWidgets.QLabel(self.frame_17)
-        self.adt2.setObjectName(_fromUtf8("adt2"))
-        self.gridLayout_42.addWidget(self.adt2, 2, 4, 1, 1)
-        self.ft1 = QtWidgets.QLabel(self.frame_17)
-        self.ft1.setObjectName(_fromUtf8("ft1"))
-        self.gridLayout_42.addWidget(self.ft1, 1, 3, 1, 1)
+        
+        self.label_38 = QtWidgets.QLabel(self.frame_17)
+        self.label_38.setObjectName(_fromUtf8("label_38"))
+        self.label_38.setText(QtWidgets.QApplication.translate(
+                                                      "Observatory", "2", None))
+        self.gridLayout_42.addWidget(self.label_38, 2, 0, 1, 1)
+        
         self.label_39 = QtWidgets.QLabel(self.frame_17)
         self.label_39.setObjectName(_fromUtf8("label_39"))
+        self.label_39.setText(QtWidgets.QApplication.translate(
+                                                      "Observatory", "3", None))
         self.gridLayout_42.addWidget(self.label_39, 3, 0, 1, 1)
-        self.label_65 = QtWidgets.QLabel(self.frame_17)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.label_65.setFont(font)
-        self.label_65.setObjectName(_fromUtf8("label_65"))
-        self.gridLayout_42.addWidget(self.label_65, 0, 4, 1, 1)
-        self.label_33 = QtWidgets.QLabel(self.frame_17)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.label_33.setFont(font)
-        self.label_33.setObjectName(_fromUtf8("label_33"))
-        self.gridLayout_42.addWidget(self.label_33, 0, 2, 1, 1)
-        self.g4 = QtWidgets.QLabel(self.frame_17)
-        self.g4.setObjectName(_fromUtf8("g4"))
-        self.gridLayout_42.addWidget(self.g4, 4, 5, 1, 1)
-        self.ft3 = QtWidgets.QLabel(self.frame_17)
-        self.ft3.setObjectName(_fromUtf8("ft3"))
-        self.gridLayout_42.addWidget(self.ft3, 3, 3, 1, 1)
-        self.adt3 = QtWidgets.QLabel(self.frame_17)
-        self.adt3.setObjectName(_fromUtf8("adt3"))
-        self.gridLayout_42.addWidget(self.adt3, 3, 4, 1, 1)
-        self.at1 = QtWidgets.QLabel(self.frame_17)
-        self.at1.setObjectName(_fromUtf8("at1"))
-        self.gridLayout_42.addWidget(self.at1, 1, 2, 1, 1)
-        self.at3 = QtWidgets.QLabel(self.frame_17)
-        self.at3.setObjectName(_fromUtf8("at3"))
-        self.gridLayout_42.addWidget(self.at3, 3, 2, 1, 1)
-        self.g3 = QtWidgets.QLabel(self.frame_17)
-        self.g3.setObjectName(_fromUtf8("g3"))
-        self.gridLayout_42.addWidget(self.g3, 3, 5, 1, 1)
-        self.label_40 = QtWidgets.QLabel(self.frame_17)
-        self.label_40.setObjectName(_fromUtf8("label_40"))
-        self.gridLayout_42.addWidget(self.label_40, 4, 0, 1, 1)
-        self.adt4 = QtWidgets.QLabel(self.frame_17)
-        self.adt4.setObjectName(_fromUtf8("adt4"))
-        self.gridLayout_42.addWidget(self.adt4, 4, 4, 1, 1)
+        
         self.label_42 = QtWidgets.QLabel(self.frame_17)
         font = QtGui.QFont()
         font.setPointSize(8)
         self.label_42.setFont(font)
         self.label_42.setObjectName(_fromUtf8("label_42"))
+        self.label_42.setText(QtWidgets.QApplication.translate(
+                                                    "Observatory", "RMS", None))
         self.gridLayout_42.addWidget(self.label_42, 0, 1, 1, 1)
-        self.rms1 = QtWidgets.QLabel(self.frame_17)
-        self.rms1.setObjectName(_fromUtf8("rms1"))
-        self.gridLayout_42.addWidget(self.rms1, 1, 1, 1, 1)
-        self.rms2 = QtWidgets.QLabel(self.frame_17)
-        self.rms2.setObjectName(_fromUtf8("rms2"))
-        self.gridLayout_42.addWidget(self.rms2, 2, 1, 1, 1)
-        self.rms3 = QtWidgets.QLabel(self.frame_17)
-        self.rms3.setObjectName(_fromUtf8("rms3"))
-        self.gridLayout_42.addWidget(self.rms3, 3, 1, 1, 1)
-        self.rms4 = QtWidgets.QLabel(self.frame_17)
-        self.rms4.setObjectName(_fromUtf8("rms4"))
-        self.gridLayout_42.addWidget(self.rms4, 4, 1, 1, 1)
+        
+        self.RFTambLabel = QtWidgets.QLabel(self.frame_17)
+        font = QtGui.QFont()
+        font.setPointSize(8)
+        self.RFTambLabel.setFont(font)
+        self.RFTambLabel.setObjectName(_fromUtf8("RFTambLabel"))
+        self.RFTambLabel.setText(QtWidgets.QApplication.translate(
+                                               "Observatory", "Amb T(C)", None)) 
+        self.gridLayout_42.addWidget(self.RFTambLabel, 0, 2, 1, 1)
+        
+        self.FPGAclkLabel = QtWidgets.QLabel(self.frame_17)
+        font = QtGui.QFont()
+        font.setPointSize(8)
+        self.FPGAclkLabel.setFont(font)
+        self.FPGAclkLabel.setObjectName(_fromUtf8("FPGAclkLabel"))
+        self.FPGAclkLabel.setText(QtWidgets.QApplication.translate(
+                                           "Observatory", "FPGAclk(MHz)", None))
+        self.gridLayout_42.addWidget(self.FPGAclkLabel, 0, 3, 1, 1)
+        
+        self.ADCTambLabel = QtWidgets.QLabel(self.frame_17)
+        font = QtGui.QFont()
+        font.setPointSize(8)
+        self.ADCTambLabel.setFont(font)
+        self.ADCTambLabel.setObjectName(_fromUtf8("ADCTambLabel"))
+        self.ADCTambLabel.setText(QtWidgets.QApplication.translate(
+                                               "Observatory", "ADC T(C)", None))
+        self.gridLayout_42.addWidget(self.ADCTambLabel, 0, 4, 1, 1)
+        
+        self.roachNum = {}
+        self.rms = {}
+        self.at = {}
+        self.ft = {}
+        self.adt = {}
+        self.g = {}
+        for num in [1,2,3,4]:
+          self.roachNum[num] = QtWidgets.QLabel(self.frame_17)
+          self.roachNum[num].setObjectName(_fromUtf8("roachNum"+str(num)))
+          self.roachNum[num].setText(QtWidgets.QApplication.translate(
+                                                 "Observatory", str(num), None))
+          self.gridLayout_42.addWidget(self.roachNum[num], num, 0, 1, 1)
+          self.rms[num] = QtWidgets.QLabel(self.frame_17)
+          self.rms[num].setObjectName(_fromUtf8("rms"+str(num)))
+          self.rms[num].setText(QtWidgets.QApplication.translate(
+                                                      "Observatory", "0", None))
+          self.gridLayout_42.addWidget(self.rms[num], num, 1, 1, 1)
+          self.at[num] = QtWidgets.QLabel(self.frame_17)
+          self.at[num].setObjectName(_fromUtf8("at"+str(num)))
+          self.at[num].setText(QtWidgets.QApplication.translate(
+                                                      "Observatory", "0", None))
+          self.gridLayout_42.addWidget(self.at[num], num, 2, 1, 1)
+          self.ft[num] = QtWidgets.QLabel(self.frame_17)
+          self.ft[num].setObjectName(_fromUtf8("ft"+str(num)))
+          self.ft[num].setText(QtWidgets.QApplication.translate(
+                                                      "Observatory", "0", None))
+          self.gridLayout_42.addWidget(self.ft[num], num, 3, 1, 1)
+          self.adt[num] = QtWidgets.QLabel(self.frame_17)
+          self.adt[num].setObjectName(_fromUtf8("adt"+str(num)))
+          self.adt[num].setText(QtWidgets.QApplication.translate(
+                                                      "Observatory", "0", None))
+          self.gridLayout_42.addWidget(self.adt[num], num, 4, 1, 1)
+          self.g[num] = QtWidgets.QLabel(self.frame_17)
+          self.g[num].setObjectName(_fromUtf8("g"+str(num)))
+          self.g[num].setText(QtWidgets.QApplication.translate(
+                                                      "Observatory", "0", None))
+          self.gridLayout_42.addWidget(self.g[num], num, 5, 1, 1)
+
+        self.label_40 = QtWidgets.QLabel(self.frame_17)
+        self.label_40.setObjectName(_fromUtf8("label_40"))
+        self.gridLayout_42.addWidget(self.label_40, 4, 0, 1, 1)
         self.gridLayout_43.addWidget(self.frame_17, 3, 0, 1, 2)
         self.label_22 = QtWidgets.QLabel(self.RfPath)
         self.label_22.setObjectName(_fromUtf8("label_22"))
         self.gridLayout_43.addWidget(self.label_22, 2, 0, 1, 1)
-        self.horizontalLayout_18 = QtWidgets.QHBoxLayout()
-        self.horizontalLayout_18.setObjectName(_fromUtf8("horizontalLayout_18"))
+        
+        self.horizontalLayout = QtWidgets.QHBoxLayout()
+        self.horizontalLayout.setObjectName(_fromUtf8("horizontalLayout"))
+        
+        self.labelSGFrq = QtWidgets.QLabel(self.RfPath)
+        font = QtGui.QFont()
+        font.setPointSize(8)
+        self.labelSGFrq.setFont(font)
+        self.labelSGFrq.setObjectName(_fromUtf8("labelSGFrq"))
+        self.labelSGFrq.setText(QtWidgets.QApplication.translate(
+                                         "Observatory", "Frequency(MHz)", None))
+        self.horizontalLayout.addWidget(self.labelSGFrq)
+        
+        self.RFsigInjLabel = QtWidgets.QLabel(self.RfPath)
+        self.RFsigInjLabel.setObjectName(_fromUtf8("RFsigInjLabel"))
+        self.RFsigInjLabel.setText(QtWidgets.QApplication.translate(
+                                       "Observatory", "FE Signal Inject", None))
+        self.gridLayout_43.addWidget(self.RFsigInjLabel, 5, 0, 1, 1)
+        
+        self.labelSGAmp = QtWidgets.QLabel(self.RfPath)
+        font = QtGui.QFont()
+        font.setPointSize(8)
+        self.labelSGAmp.setFont(font)
+        self.labelSGAmp.setObjectName(_fromUtf8("labelSGAmp"))
+        self.labelSGAmp.setText(QtWidgets.QApplication.translate(
+                                         "Observatory", "Amplitude(dBm)", None))
+        self.horizontalLayout.addWidget(self.labelSGAmp)
+        self.gridLayout_43.addLayout(self.horizontalLayout, 5, 1, 1, 1)
+        
+        self.SGRFButton = QtWidgets.QPushButton(self.RfPath)
+        self.SGRFButton.setEnabled(True)
+        self.SGRFButton.setCheckable(True)
+        self.SGRFButton.setObjectName(_fromUtf8("SGRFButton"))
+        self.SGRFButton.setText(QtWidgets.QApplication.translate(
+                                                  "Observatory", "RF ON", None))
+        self.SGRFButton.setDisabled(True)
+        self.gridLayout_43.addWidget(self.SGRFButton, 6, 0, 1, 1)
+        
+        self.freqAmpSpinBoxHLayout = QtWidgets.QHBoxLayout()
+        self.freqAmpSpinBoxHLayout.setObjectName(_fromUtf8(
+                                                       "freqAmpSpinBoxHLayout"))
         self.SGFreqSpinBox = QtWidgets.QDoubleSpinBox(self.RfPath)
         self.SGFreqSpinBox.setEnabled(True)
         self.SGFreqSpinBox.setDecimals(5)
@@ -3768,38 +3524,18 @@ class Ui_Observatory(object):
         self.SGFreqSpinBox.setSingleStep(1e-06)
         self.SGFreqSpinBox.setProperty("value", 20000.0)
         self.SGFreqSpinBox.setObjectName(_fromUtf8("SGFreqSpinBox"))
-        self.horizontalLayout_18.addWidget(self.SGFreqSpinBox)
+        self.SGFreqSpinBox.setDisabled(True)
+        self.freqAmpSpinBoxHLayout.addWidget(self.SGFreqSpinBox)
         self.SGAmpSpinBox = QtWidgets.QDoubleSpinBox(self.RfPath)
         self.SGAmpSpinBox.setEnabled(True)
         self.SGAmpSpinBox.setMinimum(-100.0)
         self.SGAmpSpinBox.setMaximum(-5.0)
         self.SGAmpSpinBox.setProperty("value", -50.0)
         self.SGAmpSpinBox.setObjectName(_fromUtf8("SGAmpSpinBox"))
-        self.horizontalLayout_18.addWidget(self.SGAmpSpinBox)
-        self.gridLayout_43.addLayout(self.horizontalLayout_18, 6, 1, 1, 1)
-        self.horizontalLayout = QtWidgets.QHBoxLayout()
-        self.horizontalLayout.setObjectName(_fromUtf8("horizontalLayout"))
-        self.labelSGFrq = QtWidgets.QLabel(self.RfPath)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.labelSGFrq.setFont(font)
-        self.labelSGFrq.setObjectName(_fromUtf8("labelSGFrq"))
-        self.horizontalLayout.addWidget(self.labelSGFrq)
-        self.labelSGAmp = QtWidgets.QLabel(self.RfPath)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.labelSGAmp.setFont(font)
-        self.labelSGAmp.setObjectName(_fromUtf8("labelSGAmp"))
-        self.horizontalLayout.addWidget(self.labelSGAmp)
-        self.gridLayout_43.addLayout(self.horizontalLayout, 5, 1, 1, 1)
-        self.SGRFButton = QtWidgets.QPushButton(self.RfPath)
-        self.SGRFButton.setEnabled(True)
-        self.SGRFButton.setCheckable(True)
-        self.SGRFButton.setObjectName(_fromUtf8("SGRFButton"))
-        self.gridLayout_43.addWidget(self.SGRFButton, 6, 0, 1, 1)
-        self.label_26 = QtWidgets.QLabel(self.RfPath)
-        self.label_26.setObjectName(_fromUtf8("label_26"))
-        self.gridLayout_43.addWidget(self.label_26, 5, 0, 1, 1)
+        self.SGAmpSpinBox.setDisabled(True)
+        self.freqAmpSpinBoxHLayout.addWidget(self.SGAmpSpinBox)
+        self.gridLayout_43.addLayout(self.freqAmpSpinBoxHLayout, 6, 1, 1, 1)
+        
         self.label_41 = QtWidgets.QLabel(self.RfPath)
         font = QtGui.QFont()
         font.setPointSize(8)
@@ -3809,36 +3545,19 @@ class Ui_Observatory(object):
         
         self.horizontalLayout_21 = QtWidgets.QHBoxLayout()
         self.horizontalLayout_21.setObjectName(_fromUtf8("horizontalLayout_21"))
-        
-        #
-        self.last_tsys1 = QtWidgets.QLabel(self.RfPath)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.last_tsys1.setFont(font)
-        self.last_tsys1.setObjectName(_fromUtf8("last_tsys1"))
-        self.horizontalLayout_21.addWidget(self.last_tsys1)
-        
-        self.last_tsys2 = QtWidgets.QLabel(self.RfPath)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.last_tsys2.setFont(font)
-        self.last_tsys2.setObjectName(_fromUtf8("last_tsys2"))
-        self.horizontalLayout_21.addWidget(self.last_tsys2)
-        self.last_tsys3 = QtWidgets.QLabel(self.RfPath)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.last_tsys3.setFont(font)
-        self.last_tsys3.setObjectName(_fromUtf8("last_tsys3"))
-        self.horizontalLayout_21.addWidget(self.last_tsys3)
-        self.last_tsys4 = QtWidgets.QLabel(self.RfPath)
-        font = QtGui.QFont()
-        font.setPointSize(8)
-        self.last_tsys4.setFont(font)
-        self.last_tsys4.setObjectName(_fromUtf8("last_tsys4"))
-        self.horizontalLayout_21.addWidget(self.last_tsys4)
+        self.last_tsys = {}
+        for num in [1,2,3,4]:
+          self.last_tsys[num] = QtWidgets.QLabel(self.RfPath)
+          font = QtGui.QFont()
+          font.setPointSize(8)
+          self.last_tsys[num].setFont(font)
+          self.last_tsys[num].setObjectName(_fromUtf8("last_tsys"+str(num)))
+          self.last_tsys[num].setText(QtWidgets.QApplication.translate(
+                                                      "Observatory", "0", None))
+          self.horizontalLayout_21.addWidget(self.last_tsys[num])
         self.gridLayout_43.addLayout(self.horizontalLayout_21, 2, 1, 1, 1)
-        self.gridLayout_25.addLayout(self.gridLayout_43, 0, 1, 1, 1)
-        self.gridLayout_41.addLayout(self.gridLayout_25, 0, 0, 1, 1)
+        self.sysStatPageGLayout.addLayout(self.gridLayout_43, 0, 1, 1, 1)
+        
         self.Ctrl_Tabs.addTab(self.RfPath, _fromUtf8(""))
         self.Ctrl_Tabs.setTabText(self.Ctrl_Tabs.indexOf(self.RfPath),
                                   QtWidgets.QApplication.translate(
@@ -4063,12 +3782,15 @@ class Ui_Observatory(object):
         self.actionInitialise_WBDC = QtWidgets.QAction(Observatory)
         self.actionInitialise_WBDC.setObjectName(_fromUtf8("actionInitialise_WBDC"))
         self.actionInitialise_Attenuators = QtWidgets.QAction(Observatory)
-        self.actionInitialise_Attenuators.setObjectName(_fromUtf8("actionInitialise_Attenuators"))
+        self.actionInitialise_Attenuators.setObjectName(
+                                      _fromUtf8("actionInitialise_Attenuators"))
         self.actionCalibrate_Attenuators = QtWidgets.QAction(Observatory)
-        self.actionCalibrate_Attenuators.setObjectName(_fromUtf8("actionCalibrate_Attenuators"))
+        self.actionCalibrate_Attenuators.setObjectName(
+                                       _fromUtf8("actionCalibrate_Attenuators"))
         
         self.actionWBDC_Low_Level_status = QtWidgets.QAction(Observatory)
-        self.actionWBDC_Low_Level_status.setObjectName(_fromUtf8("actionWBDC_Low_Level_status"))
+        self.actionWBDC_Low_Level_status.setObjectName(_fromUtf8(
+                                                 "actionWBDC_Low_Level_status"))
         self.actionWBDC_Low_Level_status.setText(QtWidgets.QApplication.translate(
                                   "Observatory", "WBDC low level status", None))
         
@@ -4094,7 +3816,8 @@ class Ui_Observatory(object):
         self.actionSky_Frequency = QtWidgets.QAction(Observatory)
         self.actionSky_Frequency.setObjectName(_fromUtf8("actionSky_Frequency"))
         self.actionSet_Reference_Frequency = QtWidgets.QAction(Observatory)
-        self.actionSet_Reference_Frequency.setObjectName(_fromUtf8("actionSet_Reference_Frequency"))
+        self.actionSet_Reference_Frequency.setObjectName(
+                                     _fromUtf8("actionSet_Reference_Frequency"))
         self.actionAveraged_Plots = QtWidgets.QAction(Observatory)
         self.actionAveraged_Plots.setObjectName(_fromUtf8("actionAveraged_Plots"))
         
@@ -4148,8 +3871,13 @@ class Ui_Observatory(object):
         
         self.actionSet_FFT_shift = QtWidgets.QAction(Observatory)
         self.actionSet_FFT_shift.setObjectName(_fromUtf8("actionSet_FFT_shift"))
+        
         self.actionAbout = QtWidgets.QAction(Observatory)
         self.actionAbout.setObjectName(_fromUtf8("actionAbout"))
+        self.actionAbout.setText(QtWidgets.QApplication.translate(
+                                                  "Observatory", "About", None))
+        self.actionAbout.triggered.connect(self.show_about)
+        
         self.actionAP_TRK = QtWidgets.QAction(Observatory)
         self.actionAP_TRK.setObjectName(_fromUtf8("actionAP_TRK"))
         self.actionAP_STOP = QtWidgets.QAction(Observatory)
@@ -4158,7 +3886,7 @@ class Ui_Observatory(object):
         self.actionRun_Snap_Block = QtWidgets.QAction(Observatory)
         self.actionRun_Snap_Block.setObjectName(_fromUtf8("actionRun_Snap_Block"))
         self.actionRun_Snap_Block.setText(QtWidgets.QApplication.translate(
-                                         "Observatory", "Run Snap Block", None))        
+                                         "Observatory", "Run Snap Block", None))
         self.menuROACH1.addAction(self.actionRun_Snap_Block)
         
         self.actionClose_APC = QtWidgets.QAction(Observatory)
@@ -4184,7 +3912,9 @@ class Ui_Observatory(object):
         self.menuConfig.addAction(self.menuROACH1.menuAction())
         self.menuConfig.addAction(self.menuWBDC.menuAction())
         self.menuConfig.addAction(self.menuRFI_Analysis.menuAction())
+        
         self.menuHelp.addAction(self.actionAbout)
+        
         self.menubar.addAction(self.menuFile.menuAction())
         self.menubar.addAction(self.menuConfig.menuAction())
         self.menubar.addAction(self.menuPlot.menuAction())
@@ -4193,11 +3923,6 @@ class Ui_Observatory(object):
 
         self.retranslateUi(Observatory)
         self.Ctrl_Tabs.setCurrentIndex(0)
-        for num in [2,3,4]:
-          self.combo[num].setCurrentIndex(-1)
-        #self.combo3.setCurrentIndex(-1)
-        #self.combo4.setCurrentIndex(-1)
-        #self.combo2.setCurrentIndex(-1)
         self.modeTabWidget.setCurrentIndex(1)
         self.modeTabWidget_2.setCurrentIndex(0)
         
@@ -4214,7 +3939,6 @@ class Ui_Observatory(object):
         self.close_apc.setText(QtWidgets.QApplication.translate("Observatory", "close APC", None))
         self.WradioButton.setText(QtWidgets.QApplication.translate("Observatory", "W", None))
         self.dBmradioButton.setText(QtWidgets.QApplication.translate("Observatory", "dBm", None))
-        self.modeTabWidget.setTabText(self.modeTabWidget.indexOf(self.modeTab), QtWidgets.QApplication.translate("Observatory", "Mode", None))
         self.bs_points.setText(QtWidgets.QApplication.translate("Observatory", "9", None))
         self.label_24.setText(QtWidgets.QApplication.translate("Observatory", "Iterations", None))
         self.bs_repeats.setText(QtWidgets.QApplication.translate("Observatory", "1", None))
@@ -4225,10 +3949,7 @@ class Ui_Observatory(object):
         self.bs_combo_box.setItemText(0, QtWidgets.QApplication.translate("Observatory", "point", None))
         self.bs_combo_box.setItemText(1, QtWidgets.QApplication.translate("Observatory", "conscan", None))
         self.calc_bs_results.setText(QtWidgets.QApplication.translate("Observatory", "Calculate", None))
-        self.modeTabWidget.setTabText(self.modeTabWidget.indexOf(self.Boresight), QtWidgets.QApplication.translate("Observatory", "Boresight", None))
-        self.modeTabWidget.setTabText(self.modeTabWidget.indexOf(self.tab_3), QtWidgets.QApplication.translate("Observatory", "Tip/Map", None))
         
-        self.modeTabWidget_2.setTabText(self.modeTabWidget_2.indexOf(self.tab), QtWidgets.QApplication.translate("Observatory", "SourceTracker", None))
         
         self.pushButton_rec_flg.setText(QtWidgets.QApplication.translate("Observatory", "Record Data", None))
         self.roachInput1.setText(QtWidgets.QApplication.translate("Observatory", "Input1", None))
@@ -4237,48 +3958,23 @@ class Ui_Observatory(object):
         
         
         self.NDtempLabel.setText(QtWidgets.QApplication.translate("Observatory", "K", None))
-        self.checkNoise.setText(QtWidgets.QApplication.translate("Observatory", "Noise Diode", None))
         self.nd_mod_pb.setText(QtWidgets.QApplication.translate("Observatory", "ND mod", None))
-        self.g2.setText(QtWidgets.QApplication.translate("Observatory", "4", None))
-        self.ft4.setText(QtWidgets.QApplication.translate("Observatory", "0", None))
-        self.label_38.setText(QtWidgets.QApplication.translate("Observatory", "2", None))
-        self.label_34.setText(QtWidgets.QApplication.translate("Observatory", "FPGAclk(MHz)", None))
-        self.g1.setText(QtWidgets.QApplication.translate("Observatory", "4", None))
-        self.label_35.setText(QtWidgets.QApplication.translate("Observatory", "Roach", None))
-        self.at2.setText(QtWidgets.QApplication.translate("Observatory", "0", None))
-        self.at4.setText(QtWidgets.QApplication.translate("Observatory", "0", None))
-        self.ft2.setText(QtWidgets.QApplication.translate("Observatory", "0", None))
+        #self.g2.setText(QtWidgets.QApplication.translate("Observatory", "4", None))
+        #self.ft4.setText(QtWidgets.QApplication.translate("Observatory", "0", None))
+        #self.at2.setText(QtWidgets.QApplication.translate("Observatory", "0", None))
+        #self.at4.setText(QtWidgets.QApplication.translate("Observatory", "0", None))
+        #self.ft2.setText(QtWidgets.QApplication.translate("Observatory", "0", None))
         self.label_36.setText(QtWidgets.QApplication.translate("Observatory", "Gain(dBm)", None))
-        self.label_37.setText(QtWidgets.QApplication.translate("Observatory", "1", None))
-        self.adt1.setText(QtWidgets.QApplication.translate("Observatory", "0", None))
-        self.adt2.setText(QtWidgets.QApplication.translate("Observatory", "0", None))
-        self.ft1.setText(QtWidgets.QApplication.translate("Observatory", "0", None))
-        self.label_39.setText(QtWidgets.QApplication.translate("Observatory", "3", None))
-        self.label_65.setText(QtWidgets.QApplication.translate("Observatory", "ADC T(C)", None))
-        self.label_33.setText(QtWidgets.QApplication.translate("Observatory", "Amb T(C)", None))
-        self.g4.setText(QtWidgets.QApplication.translate("Observatory", "4", None))
-        self.ft3.setText(QtWidgets.QApplication.translate("Observatory", "0", None))
-        self.adt3.setText(QtWidgets.QApplication.translate("Observatory", "0", None))
-        self.at1.setText(QtWidgets.QApplication.translate("Observatory", "0", None))
-        self.at3.setText(QtWidgets.QApplication.translate("Observatory", "0", None))
-        self.g3.setText(QtWidgets.QApplication.translate("Observatory", "4", None))
+        #self.adt2.setText(QtWidgets.QApplication.translate("Observatory", "0", None))
+        #self.at3.setText(QtWidgets.QApplication.translate("Observatory", "0", None))
+        #self.g3.setText(QtWidgets.QApplication.translate("Observatory", "4", None))
         self.label_40.setText(QtWidgets.QApplication.translate("Observatory", "4", None))
-        self.adt4.setText(QtWidgets.QApplication.translate("Observatory", "0", None))
-        self.label_42.setText(QtWidgets.QApplication.translate("Observatory", "RMS", None))
-        self.rms1.setText(QtWidgets.QApplication.translate("Observatory", "0", None))
-        self.rms2.setText(QtWidgets.QApplication.translate("Observatory", "0", None))
-        self.rms3.setText(QtWidgets.QApplication.translate("Observatory", "0", None))
-        self.rms4.setText(QtWidgets.QApplication.translate("Observatory", "0", None))
+        #self.adt4.setText(QtWidgets.QApplication.translate("Observatory", "0", None))
+        #self.rms2.setText(QtWidgets.QApplication.translate("Observatory", "0", None))
+        #self.rms3.setText(QtWidgets.QApplication.translate("Observatory", "0", None))
+        #self.rms4.setText(QtWidgets.QApplication.translate("Observatory", "0", None))
         self.label_22.setText(QtWidgets.QApplication.translate("Observatory", "ROACH monitor", None))
-        self.labelSGFrq.setText(QtWidgets.QApplication.translate("Observatory", "Frequency(MHz)", None))
-        self.labelSGAmp.setText(QtWidgets.QApplication.translate("Observatory", "Amplitude(dBm)", None))
-        self.SGRFButton.setText(QtWidgets.QApplication.translate("Observatory", "RF ON", None))
-        self.label_26.setText(QtWidgets.QApplication.translate("Observatory", "FE Signal Inject", None))
         self.label_41.setText(QtWidgets.QApplication.translate("Observatory", "Last minical Tsys", None))
-        self.last_tsys1.setText(QtWidgets.QApplication.translate("Observatory", "0", None))
-        self.last_tsys2.setText(QtWidgets.QApplication.translate("Observatory", "0", None))
-        self.last_tsys3.setText(QtWidgets.QApplication.translate("Observatory", "0", None))
-        self.last_tsys4.setText(QtWidgets.QApplication.translate("Observatory", "0", None))
         
         
         
@@ -4358,7 +4054,6 @@ class Ui_Observatory(object):
         self.actionSet_Reference_Frequency.setText(QtWidgets.QApplication.translate("Observatory", "Set Reference Frequency", None))
         self.actionAveraged_Plots.setText(QtWidgets.QApplication.translate("Observatory", "Averaged Plots", None))
         self.actionSet_FFT_shift.setText(QtWidgets.QApplication.translate("Observatory", "Set FFT shift", None))
-        self.actionAbout.setText(QtWidgets.QApplication.translate("Observatory", "About", None))
         self.actionAP_TRK.setText(QtWidgets.QApplication.translate("Observatory", "AP TRK", None))
         self.actionAP_STOP.setText(QtWidgets.QApplication.translate("Observatory", "AP STOP", None))
 

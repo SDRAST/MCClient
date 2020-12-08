@@ -53,18 +53,27 @@ cdscc.pressure = 0
 cdscc.epoch = ephem.J2000
 cdscc.date = datetime.datetime.utcnow()
 marker = {}
-sun = ephem.Sun();          marker[sun] = "$\u2609$"
-mercury = ephem.Mercury() ; marker[mercury] = "$\u263F$"
-venus = ephem.Venus();      marker[venus] = "$\u2640$"
-moon = ephem.Moon();        marker[moon] = "$\u263D$"
-mars = ephem.Mars();        marker[mars] = "$\u2642$"
-jove = ephem.Jupiter();     marker[jove] = "$\u2609$"
+sun     = ephem.Sun();     marker[sun] = "$\u2609$"
+mercury = ephem.Mercury(); marker[mercury] = "$\u263F$"
+venus   = ephem.Venus();   marker[venus] = "$\u2640$"
+moon    = ephem.Moon();    marker[moon] = "$\u263D$"
+mars    = ephem.Mars();    marker[mars] = "$\u2642$"
+jove    = ephem.Jupiter(); marker[jove] = "$\u2609$"
 
-
-#class PlotSkymap(PlotDef):
 class PlotSkymap(object):
     """
     class for source selection sky map
+    
+    Attributes:
+    
+        source_dict:     information for all sources, keyed on source name
+        source_info_ra 
+        source_info_dec 
+        source_info_az 
+        source_info_alt 
+        source_info_vsys 
+        source_name:     currently selected source name 
+
     """
     # signals when categories are updated
     masers = pyqtSignal(bool)
@@ -72,8 +81,6 @@ class PlotSkymap(object):
     def __init__(self, main, ui, server, band):        # removed logfile
         """
         initialize the sky map
-        
-        
         """
         mylogger = logging.getLogger(logger.name+".PlotSkymap")
         mylogger.debug("__init__: entered")
@@ -93,17 +100,15 @@ class PlotSkymap(object):
         
         # since we don't plan on removing these mouse event connections we don't
         # need to save their ISm
-        self.ui.skymap_canvas.mpl_connect('pick_event', self.source_pick)
+        #self.ui.skymap_canvas.mpl_connect('pick_event', self.source_pick)
+        self.ui.skymap_canvas.mpl_connect('pick_event',
+                                          self.ui.skymap_axes.picker)
         self.ui.skymap_canvas.mpl_connect('button_press_event', self.onclick)
         
-        #self.ui.cb_srcs.clicked.connect(self.current_pos)
-        #self.ui.cb_cal.clicked.connect(self.current_pos)
-        #self.ui.cb_km.clicked.connect(self.current_pos)
-        self.ui.cb_tel.clicked.connect(self.current_pos) # antenna
-        self.ui.cb_pl.clicked.connect(self.current_pos) # planets
+        self.ui.cb_tel.clicked.connect(self.current_pos)  # antenna
+        self.ui.cb_pl.clicked.connect(self.current_pos)   # planets
         self.ui.cb_moon.clicked.connect(self.current_pos) # moon
-        self.ui.cb_sun.clicked.connect(self.current_pos) # sun
-        #self.ui.cb_gp.clicked.connect(self.current_pos)
+        self.ui.cb_sun.clicked.connect(self.current_pos)  # sun
 
         self.ui.load_catalogue.clicked.connect(self.load_catalogue)
         self.ui.find_nearest.clicked.connect(self.find_nearest_bore)
@@ -113,7 +118,9 @@ class PlotSkymap(object):
         self.logger.debug("__init__: finished")
 
     def __call__(self, mouse_event):
+        self.logger.debug("__call__: invokes with %s", mouse_event)
         ax = mouse_event.inaxes
+        self.logger.debug("__call__: axes are %s", ax)
         if not ax:
             return
         line = ax.get_lines()[0]
@@ -129,26 +136,22 @@ class PlotSkymap(object):
                 annotation.set_visible(True)
         ax.figure.canvas.update()
 
-    def plot_definitions(self):
+    def plot_definitions(self, polar=False):
         """
         initialize az/el plot
         """
-        self.ui.skymap_axes.grid(True)
         # draw elevation limit lines in appropriate units
-        low_limit_x_axis_plt = numpy.arange(0, 360, 1)
-          
-        low_limit_y_axis_plt = numpy.zeros(360)
+        low_limit_y_axis_plt  = numpy.zeros(360)
         high_limit_y_axis_plt = numpy.zeros(360)
+        low_limit_x_axis_plt = numpy.arange(0, 360, 1)
         low_limit_y_axis_plt[:] = 6
         high_limit_y_axis_plt[:] = 80
-        self.ui.skymap_axes.set_xlabel('AZ (deg)')
-        self.ui.skymap_axes.set_ylabel('EL (deg)')
-        self.ui.skymap_axes.set_xlim(0,360)
-        self.ui.skymap_axes.set_ylim(-1,91)
         self.ui.skymap_axes.plot(low_limit_x_axis_plt, low_limit_y_axis_plt,
-                                color='red', ls ='--')
+                                 marker=None,
+                                 color='red', ls ='--')
         self.ui.skymap_axes.plot(low_limit_x_axis_plt, high_limit_y_axis_plt,
-                                color='red', ls ='--')
+                                 marker=None,
+                                 color='red', ls ='--')
         self.ui.skymap_canvas.draw()
 
     def current_pos(self):
@@ -175,6 +178,7 @@ class PlotSkymap(object):
         # self.logger.debug("plot_current: called at %s", utc_now_py)
 
         self.ui.skymap_axes.cla() # clear plot
+        self.ui.skymap_axes.format_axes()
         self.source_dict = {}     # clear dict of all plotted sources
         plot_categories = []
         for category in self.main.categories:
@@ -203,26 +207,28 @@ class PlotSkymap(object):
     def calculate_telescope_pos(self):
         """
         plot the telescope direction
+        
+        telescope coordinates are in degrees
         """
         # plot the telescope position in Az-El
         tel_az = float(self.ui.az_mon.text())
         tel_el = float(self.ui.el_mon.text())
-        #self.logger.debug("calculate_telescope_pos: el, az = %s, %s",
-        #                  tel_el, tel_az)
-        self.ui.skymap_axes.plot(tel_az, tel_el, "+", color="red",
-                                 markersize=16)
+        if tel_el > 0:
+          self.ui.skymap_axes.plot(tel_az, tel_el, "+", color="red",
+                                   markersize=16)
 
     def calculate_sun(self, date):
         """
         plot the position of the Sun
+        
+        ephem coordinates are in radians
         """
         cdscc.date = date
         sun.compute(cdscc)            
-        #self.logger.debug("calculate_sun: el, az = %6.1f, %6.1f",
-        #                  sun.az*rad2deg, sun.alt*rad2deg)
-        self.ui.skymap_axes.plot(sun.az*rad2deg, sun.alt*rad2deg,
-                                marker=marker[sun], color="yellow",
-                                markersize=16, picker=5)
+        if sun.alt > 0:
+          self.ui.skymap_axes.plot(sun.az*rad2deg, sun.alt*rad2deg,
+                                   marker=marker[sun], color="yellow",
+                                   markersize=16, picker=5)
         # add to dict of all plotted sources
         self.source_dict[sun.name] = [sun.ra, sun.dec, sun.az, sun.alt]
         
@@ -232,11 +238,10 @@ class PlotSkymap(object):
         """
         cdscc.date = date
         moon.compute(cdscc)            
-        #self.logger.debug("calculate_moon: el, az = %6.1f, %6.1f",
-        #                  moon.az*rad2deg, moon.alt*rad2deg)
-        self.ui.skymap_axes.plot(moon.az*rad2deg, moon.alt*rad2deg,
-                                marker=marker[moon], color="orange",
-                                markersize=15, picker=5)
+        if moon.alt > 0:
+          self.ui.skymap_axes.plot(moon.az*rad2deg, moon.alt*rad2deg,
+                                   marker=marker[moon], color="orange",
+                                   markersize=15, picker=5)
         # add to dict of all plotted sources
         self.source_dict[moon.name] = [moon.ra, moon.dec, moon.az, moon.alt]
 
@@ -245,25 +250,28 @@ class PlotSkymap(object):
         
         jove.compute(cdscc)
         flux = get_planet_flux('Jupiter', self.freq, datetime.datetime.now())
-        self.ui.skymap_axes.plot(jove.az*rad2deg, jove.alt*rad2deg, 
-                                marker=marker[jove], color="brown",
-                                markersize=flux+3, picker=5)
+        if jove.alt > 0:
+          self.ui.skymap_axes.plot(jove.az*rad2deg, jove.alt*rad2deg, 
+                                   marker=marker[jove], color="brown",
+                                   markersize=flux+3, picker=5)
         self.source_dict[jove.name] = [jove.ra, jove.dec, jove.az, jove.alt,
                                        flux, 0.0]
                                        
         mars.compute(cdscc)
         flux = get_planet_flux('Mars', self.freq, datetime.datetime.now())
-        self.ui.skymap_axes.plot(mars.az*rad2deg, mars.alt*rad2deg,
-                                marker=marker[mars], color="red",
-                                markersize=flux+3, picker=5)
+        if mars.alt > 0:
+          self.ui.skymap_axes.plot(mars.az*rad2deg, mars.alt*rad2deg,
+                                   marker=marker[mars], color="red",
+                                   markersize=flux+3, picker=5)
         self.source_dict[mars.name] = [mars.ra, mars.dec, mars.az, mars.alt,
                                        flux, 0.0
                                        ]
         venus.compute(cdscc)
         flux = get_planet_flux('Venus', self.freq, datetime.datetime.now())
-        self.ui.skymap_axes.plot(venus.az*rad2deg, venus.alt*rad2deg,
-                                marker=marker[venus], color="orange",
-                                markersize=flux+3, picker=5)
+        if venus.alt > 0:
+          self.ui.skymap_axes.plot(venus.az*rad2deg, venus.alt*rad2deg,
+                                   marker=marker[venus], color="orange",
+                                   markersize=flux+3, picker=5)
         self.source_dict[venus.name] = [venus.ra, venus.dec, venus.az, venus.alt,
                                         flux, 0.0]
                                         
@@ -275,24 +283,19 @@ class PlotSkymap(object):
         """
         plot the calibrators
         
-        A ``SerializableBody`` returned by ``CentralServer`` method ``get_sources()``
-        initially has the following attributes: ``_ra``, ``_dec``, ``name``, 
-        ``info``, and ``observer_info``.  After ``compute()`` has been called 
-        it also has ``az`` and ``alt``, and other ``ephem.Body}`` attributes.
+        A ``SerializableBody`` returned by ``CentralServer`` method
+        ``get_sources()`` initially has the following attributes: ``_ra``,
+        ``_dec``, ``name``, ``info``, and ``observer_info``.  After 
+        ``compute()`` has been called it also has ``az`` and ``alt``, and other
+        ``ephem.Body}`` attributes.
         """
-        #self.plot_calibrators = True
-        #self.calibrators.emit(self.plot_calibrators)
-        #self.emit(QtCore.SIGNAL("calibrators"), self.plot_calibrators)
         cdscc.date = utc_now_py
         if categories:
-          #self.logger.debug("plot_Calcurrent: requesting %s", categories)
           sources = self.main.get_sources_data(
                                 self.main.project, filter_categories=categories)
         else:
           return
-        #self.logger.debug("plot_Calcurrent: %d sources returned", len(sources))
         for item in sources:
-          #self.logger.debug("plot_Calcurrent: processing %s", sources[item].info['key'])
           source = sources[item]
           source.compute(cdscc)
           if source.alt > 0:
@@ -300,17 +303,24 @@ class PlotSkymap(object):
                                    marker='o', color=source.info['fill'],
                                    markersize=source.info['r'],
                                    alpha=source.info['opacity'], picker=5)
+            try:
+              flux = float(source.info['flux'][self.band])
+            except KeyError:
+              self.logger.warning("plot_Calcurrent: no band %s", self.band)
+              flux = 0
             self.source_dict[source.name] = [source.ra, source.dec,
                                              source.az, source.alt,
-                                             float(source.info['flux'][self.band]),
+                                             flux,
                                              source.info['velocity']]
 
-    def source_pick(self, event1):
+    def source_pick(self, *args):
         """
         Right click- gets Info of the source
         Left click- selects source
         scroll- finds nearest source
         """
+        self.logger.debug("source_pick: called with %s", args)
+        event1 = args[0]
         # Merge dictinaries for whatever sources ticked in the GUI
         thisline = None
         thisline = event1.artist
@@ -320,15 +330,15 @@ class PlotSkymap(object):
         #When Plotting in Az-El
         self.source_pick_az = thisline.get_xdata()[0]
         self.source_pick_alt = thisline.get_ydata()[0]
-        #self.logger.debug("source_pick: az/el = %s/%s", 
-        #                  self.source_pick_az, self.source_pick_alt)
-        n = 0
-        m = 0
+        self.logger.debug("source_pick: az/el = %s/%s", 
+                          self.source_pick_az, self.source_pick_alt)
+        #n = 0
+        #m = 0
         for key, value in list(self.source_dict.items()):
-            #self.logger.debug("source_pick: matching az %s",
-            #                  self.source_pick_az)
-            #self.logger.debug("source_pick: ... az %s",
-            #                  repr(ephem.hours(value[2])*rad2deg))
+            self.logger.debug("source_pick: matching az %s",
+                              self.source_pick_az)
+            self.logger.debug("source_pick: ... az %s",
+                              repr(ephem.hours(value[2])*rad2deg))
             if round(numpy.float64(self.source_pick_az), 6) == \
                round(numpy.float64(repr(ephem.hours(value[2])*rad2deg)), 6): 
                 self.logger.debug("source_pick: match found for object %s", key)
@@ -337,6 +347,7 @@ class PlotSkymap(object):
                 self.source_info_dec = value[1]
                 self.source_info_az = value[2]
                 self.source_info_alt = value[3]
+                self.source_info_flux = value[4]
                 self.source_info_vsys = value[5]
             else:
                 pass
@@ -361,40 +372,58 @@ class PlotSkymap(object):
             if event.button==1:
                 self.logger.debug('onclick: left click- Source selected')
                 self.ui.sourceInfo.clear()
-                self.ui.sourceInfo.insertPlainText(self.source_name+"\n")
-                self.ui.sourceInfo.insertPlainText("RA: "+str(self.source_info_ra)+"\n")
-                self.ui.sourceInfo.insertPlainText("DEC: "+str(self.source_info_dec)+"\n")
-                self.ui.sourceInfo.insertPlainText("Az: "+str(self.source_info_az)+"\n")
-                self.ui.sourceInfo.insertPlainText("El: "+str(self.source_info_alt)+"\n")
-                self.ui.sourceInfo.insertPlainText("Vsys: "+str(self.source_info_vsys)+"\n")
+                self.ui.sourceInfo.insertPlainText(
+                                         self.ui.skymap_axes.source_name+"\n")
+                self.ui.sourceInfo.insertPlainText("RA: "
+                                                 +str(self.source_info_ra)+"\n")
+                self.ui.sourceInfo.insertPlainText("DEC: "
+                                                +str(self.source_info_dec)+"\n")
+                self.ui.sourceInfo.insertPlainText("Az: "
+                                                 +str(self.source_info_az)+"\n")
+                self.ui.sourceInfo.insertPlainText("El: "
+                                                +str(self.source_info_alt)+"\n")
+                self.ui.sourceInfo.insertPlainText("Flux: "
+                                               +str(self.source_info_flux)+"\n")
+                self.ui.sourceInfo.insertPlainText("Vsys: "
+                                               +str(self.source_info_vsys)+"\n")
 
             elif event.button==3:
                 self.logger.debug('onclick: right click- Source info presented')
                 self.ui.sourceInfo.clear()
                 self.ui.sourceInfo.insertPlainText(self.source_name_label+"\n")
-                self.ui.sourceInfo.insertPlainText("RA: "+str(self.source_info_ra)+"\n")
-                self.ui.sourceInfo.insertPlainText("DEC: "+str(self.source_info_dec)+"\n")
-                self.ui.sourceInfo.insertPlainText("Az: "+str(self.source_info_az)+"\n")
-                self.ui.sourceInfo.insertPlainText("El: "+str(self.source_info_alt)+"\n")
-                self.ui.sourceInfo.insertPlainText("Vsys: "+str(self.source_info_vsys)+"\n")
+                self.ui.sourceInfo.insertPlainText("RA: "
+                                                 +str(self.source_info_ra)+"\n")
+                self.ui.sourceInfo.insertPlainText("DEC: "
+                                                +str(self.source_info_dec)+"\n")
+                self.ui.sourceInfo.insertPlainText("Az: "
+                                                 +str(self.source_info_az)+"\n")
+                self.ui.sourceInfo.insertPlainText("El: "
+                                                +str(self.source_info_alt)+"\n")
+                self.ui.sourceInfo.insertPlainText("Flux: "
+                                               +str(self.source_info_flux)+"\n")
+                self.ui.sourceInfo.insertPlainText("Vsys: "
+                                               +str(self.source_info_vsys)+"\n")
             else:
                 self.logger.warning("onclick: button not recognised")
-        except:
-            self.logger.error("onclick: error occured when getting source info")
+        except AttributeError as details:
+            self.logger.error("onclick: no source selected: %s", details)
+        except Exception as details:
+            self.logger.error("onclick: error getting source info: %s",
+                              details)
             
     def refresh_plot(self):
         self.ui.skymap_canvas.update()
         self.ui.skymap_canvas.draw()
                 
-    def run(self):
-        """
-        Sources-
-        Observer, Sun, Moon, Planets,
-        TODO:
-            Plot feed position on sky
-        """
-        self.plot_definitions()
-        self.__timerfunction()
+    #def run(self):
+    #    """
+    #    Sources-
+    #    Observer, Sun, Moon, Planets,
+    #    TODO:
+    #        Plot feed position on sky
+    #    """
+    #    self.plot_definitions()
+    #    self.__timerfunction()
 
     def __timerfunction(self):
         """
@@ -611,9 +640,6 @@ class PlotSkymap(object):
                           self.get_masersource_info(), utc_now_py), 'yellow', 1)
         self.source_dict = dict(list(self.calculate_source_positions(
                               self.get_masersource_info(), utc_now_py).items()))
-
-    def test(self, event1):
-        if debug: print("Debug1")
 
     #Scroll refreshes the plot...
     #  to be used for peak search function(not implemented)
